@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# aether — AETHER OS one-command dispatcher.
+#
+#   ./aether init      wire it up (copy templates, set exec bits, hook the gate)
+#   ./aether doctor    read-only health check of your setup
+#   ./aether reset     remove the worked example so the vaults are yours
+#   ./aether sync URL  back up to YOUR own git remote (opt-in; the only net step)
+#
+# No dependencies beyond bash + python3 + git. No network except `sync`. Idempotent.
+set -u
+
+REPO="$(cd "$(dirname "$0")" && pwd)"
+cd "$REPO" || { echo "aether: cannot cd to repo root"; exit 1; }
+
+ok()   { printf '  [ok]   %s\n' "$1"; }
+warn() { printf '  [warn] %s\n' "$1"; }
+fail() { printf '  [FAIL] %s\n' "$1"; }
+die()  { printf 'aether: %s\n' "$1" >&2; exit 1; }
+
+# files that must be executable for the hooks to fire
+EXECUTABLES=(
+  aether
+  tools/dispatch-trace.py tools/gateguard.py tools/precommit-scan
+  tools/vault-sync tools/telegram-send tools/setup-git.sh tools/statusline.py
+  tools/memory-propose.sh tools/memory-sweep-due.sh tools/memory-proposals-resume.sh
+  system/hooks/dispatch-trace.py system/hooks/gateguard.py system/hooks/vault-sync.sh
+  system/hooks/memory-propose.sh system/hooks/memory-sweep-due.sh
+  system/hooks/memory-proposals-resume.sh
+  system/githooks/pre-commit
+  system/memory/propose.py system/memory/sweep.py
+)
+
+copy_if_absent() { # src dst
+  [ -f "$1" ] || { warn "missing template: $1 (skipped)"; return 0; }
+  if [ -f "$2" ]; then ok "$2 (already present, kept)"; return 0; fi
+  cp "$1" "$2" || die "could not copy $1 -> $2"
+  ok "created $2"
+}
+
+cmd_init() {
+  echo "AETHER OS — init (in $REPO)"
+
+  mkdir -p .claude || die "could not create .claude/"
+  copy_if_absent system/settings.example.json .claude/settings.json
+  copy_if_absent system/denylist.example.txt  system/denylist.txt
+  copy_if_absent tools/telegram.env.example   tools/telegram.env
+
+  local n=0
+  for f in "${EXECUTABLES[@]}"; do
+    [ -e "$f" ] || continue
+    chmod +x "$f" || die "could not chmod +x $f"
+    n=$((n+1))
+  done
+  ok "set exec bit on $n hook/tool scripts"
+
+  if [ -d .git ]; then
+    local cur; cur="$(git config --get core.hooksPath || true)"
+    if [ -n "$cur" ] && [ "$cur" != "system/githooks" ]; then
+      warn "core.hooksPath is already '$cur' — leaving it. To enable the AETHER"
+      warn "       pre-commit gate, run: git config core.hooksPath system/githooks"
+    else
+      git config core.hooksPath system/githooks && ok "pre-commit gate wired (core.hooksPath)"
+    fi
+  else
+    warn "not a git repo — skipped the pre-commit gate (run 'git init' first if you want it)"
+  fi
+
+  echo
+  echo "AETHER ready. Launch the assistant FROM THIS FOLDER so it loads .claude/settings.json:"
+  echo
+  echo "    cd \"$REPO\" && claude"
+  echo
+  echo "Then say:  \"Read examples/introduction.md and introduce yourself.\""
+  echo "When you're ready to make it yours, fill in introduction.md and run ./aether reset."
+}
+
+cmd_doctor() {
+  echo "AETHER OS — doctor (read-only)"
+  local issues=0
+
+  case "$(uname -s)" in
+    Darwin) ok "OS macOS supported" ;;
+    Linux)
+      if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+        ok "OS Windows (WSL2) supported"
+      else
+        ok "OS Linux supported"
+      fi ;;
+    MINGW*|MSYS*|CYGWIN*)
+      fail "native Windows shell detected (Git Bash/MSYS). The hooks need a real"
+      fail "       Linux shell — please run AETHER OS inside WSL2 (https://aka.ms/wsl)."
+      issues=$((issues+1)) ;;
+    *) warn "OS $(uname -s) untested — on Windows use WSL2"; issues=$((issues+1)) ;;
+  esac
+
+  command -v python3 >/dev/null 2>&1 && ok "python3 present" || { fail "python3 not found"; issues=$((issues+1)); }
+  command -v git     >/dev/null 2>&1 && ok "git present"     || { fail "git not found"; issues=$((issues+1)); }
+
+  if [ -f .claude/settings.json ]; then ok ".claude/settings.json present"
+  else warn ".claude/settings.json missing — run ./aether init"; issues=$((issues+1)); fi
+
+  local missing_x=0
+  for f in tools/gateguard.py system/hooks/memory-propose.sh system/githooks/pre-commit \
+           system/memory/propose.py system/memory/sweep.py; do
+    [ -e "$f" ] || { fail "missing file: $f"; issues=$((issues+1)); continue; }
+    [ -x "$f" ] || missing_x=$((missing_x+1))
+  done
+  if [ "$missing_x" -eq 0 ]; then ok "hook/engine scripts are executable"
+  else warn "$missing_x script(s) not executable — run ./aether init"; issues=$((issues+1)); fi
+
+  # memory engine smoke test (contracts the hooks rely on)
+  if python3 system/memory/propose.py list >/dev/null 2>&1 \
+     && python3 system/memory/sweep.py --dry-run 2>/dev/null | grep -q "'flagged':"; then
+    ok "memory engine responds to its hook contracts"
+  else
+    fail "memory engine not responding — governed memory will not work"; issues=$((issues+1))
+  fi
+
+  if [ -d .git ]; then
+    local cur; cur="$(git config --get core.hooksPath || true)"
+    [ "$cur" = "system/githooks" ] && ok "pre-commit gate wired" \
+      || { warn "pre-commit gate not wired (core.hooksPath='$cur') — run ./aether init"; issues=$((issues+1)); }
+  fi
+
+  [ -d examples ] && ok "worked example present (run ./aether reset to clear it)" \
+    || ok "examples/ already cleared"
+
+  echo
+  if [ "$issues" -eq 0 ]; then echo "All green. Launch with: cd \"$REPO\" && claude"
+  else echo "$issues item(s) need attention (see [warn]/[FAIL] above)."; return 1; fi
+}
+
+cmd_reset() {
+  if [ ! -d examples ]; then echo "examples/ already gone — nothing to reset."; return 0; fi
+  printf "Remove the worked example (examples/) so the vaults are yours? [y/N] "
+  read -r ans
+  case "$ans" in
+    y|Y|yes|YES) rm -rf examples && echo "Removed examples/. Fresh start — fill in introduction.md." ;;
+    *) echo "Kept examples/." ;;
+  esac
+}
+
+cmd_sync() {
+  [ -x tools/setup-git.sh ] || die "tools/setup-git.sh not found/executable (run ./aether init)"
+  exec tools/setup-git.sh "$@"
+}
+
+case "${1:-}" in
+  init)   shift; cmd_init   "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  reset)  shift; cmd_reset  "$@" ;;
+  sync)   shift; cmd_sync   "$@" ;;
+  ""|-h|--help|help)
+    cat <<EOF
+AETHER OS — one assistant, many vaults, no bleed.
+
+usage: ./aether <command>
+
+  init      wire it up: copy templates, set exec bits, hook the pre-commit gate
+  doctor    read-only health check of your setup
+  reset     remove the worked example (examples/) so the vaults are yours
+  sync URL  back up to YOUR own git remote (opt-in; the only step that uses the network)
+
+First run:  ./aether init   then   claude   (from this folder)
+EOF
+    ;;
+  *) die "unknown command '$1' (try ./aether help)" ;;
+esac

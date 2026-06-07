@@ -1,0 +1,35 @@
+# precommit-scan — user-specific denied terms (literal, case-insensitive).
+#
+# IMPORTANT: Copy this file to system/denylist.txt and add it to .gitignore.
+# The real denylist MUST stay gitignored — the whole point is to keep the
+# sensitive strings *out* of the commit graph.
+#
+# SCOPE: these terms are scanned in the SHAREABLE doctrine zones ONLY
+# (vaults/vault1/concepts, entities, analysis, sources) — the layer that may be
+# published or open-sourced. They are NOT scanned in private vaults
+# (vaults/vault2, vaults/vault3), where such terms are legitimate. (Secret-keys
+# are a separate, repo-wide scan via tools/precommit-patterns.txt.)
+#
+# WHAT BELONGS HERE — PRIVATE / EXTERNAL fingerprints only:
+#   - an employer's company name or codename
+#   - customer / client account names
+#   - vendor names under NDA, contract specifics, negotiated pricing
+#   - specific deployment locations, internal hostnames/IPs, individuals
+#
+# WHAT DOES *NOT* BELONG HERE — your own public ventures:
+#   - your own product/brand names that you intend to publish. Adding them would
+#     block nearly every commit. The denylist guards OTHERS' private info, not
+#     your own brands.
+#
+# Format: one literal substring per line. Lines starting with `#` ignored.
+# Trailing `# comment` allowed. Matches are case-insensitive substring
+# (grep -Fi), not regex. Keep entries specific enough to avoid false hits.
+#
+# Examples (REPLACE with your real values in system/denylist.txt, then save):
+#   acmecorp                # employer codename
+#   contoso                 # client account
+#   project-aurora          # client/internal codename (NOT your own)
+#   10.42.0.7               # internal IP
+#   jane.doe@example.com    # individual identifier
+
+# Add entries below this line (in system/denylist.txt, not this example file):

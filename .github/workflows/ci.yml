@@ -1,0 +1,43 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wire it up (aether init)
+        run: bash aether init
+
+      - name: Health check (aether doctor)
+        run: bash aether doctor
+
+      - name: Memory engine honors its hook contracts
+        run: |
+          # propose.py list -> first stdout line is a bare integer
+          line1="$(python3 system/memory/propose.py list | head -1)"
+          case "$line1" in ''|*[!0-9]*) echo "FAIL: list line 1 not a count: '$line1'"; exit 1 ;; esac
+          # sweep.py --dry-run -> emits 'flagged': N
+          python3 system/memory/sweep.py --dry-run | grep -q "'flagged':" \
+            || { echo "FAIL: sweep --dry-run missing 'flagged':"; exit 1; }
+          # sweep flags the deliberately-stale example entry
+          python3 system/memory/sweep.py --dry-run examples/memory | grep -q "'flagged': 1" \
+            || { echo "FAIL: sweep did not flag the stale example"; exit 1; }
+          echo "memory contracts OK"
+
+      - name: Pre-commit gate blocks a planted secret
+        run: |
+          printf 'aws_key = AKIAIOSFODNN7EXAMPLE\n' > planted_secret.txt
+          git add planted_secret.txt
+          if tools/precommit-scan .; then
+            echo "FAIL: the gate did NOT block a planted secret"; exit 1
+          else
+            echo "gate blocked the planted secret as expected"
+          fi
+          git rm -f --cached planted_secret.txt >/dev/null 2>&1 || true
+          rm -f planted_secret.txt

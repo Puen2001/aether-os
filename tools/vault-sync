@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# vault-sync — best-effort auto-persist for the vault repo.
+#
+# ONE repo, ONE push: stage everything, run the secret/IP gate, commit, then push
+# (detached so a slow network never blocks the session). Wired as a Stop hook in
+# settings.json; also safe to run manually.
+#
+# Paths resolve against VAULT_ROOT (defaults to the build root one level up from
+# this script's parent). Override with the VAULT_ROOT env var if the repo lives
+# elsewhere. Lock-protected so overlapping invocations bail.
+#
+# Manual run:  vault-sync        Log:  /tmp/vault-sync.log
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VAULT_ROOT="${VAULT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+SCAN="$SCRIPT_DIR/precommit-scan"
+LOG="/tmp/vault-sync.log"
+LOCK_DIR="/tmp/vault-sync.lockdir"
+TS="$(date '+%Y-%m-%d %H:%M:%S')"
+
+# Single-instance lock (atomic mkdir; stale after 10 min).
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  if [ -d "$LOCK_DIR" ] && [ "$(find "$LOCK_DIR" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+    rmdir "$LOCK_DIR" 2>/dev/null
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+  else
+    exit 0
+  fi
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+exec >>"$LOG" 2>&1
+echo "-- vault-sync $TS --"
+
+cd "$VAULT_ROOT" || { echo "ERR: vault root missing"; exit 0; }
+[ -d .git ] || { echo "ERR: not a git repo"; exit 0; }
+
+# 1) Commit everything that changed (.gitignore enforces secret exclusion).
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  git add -A
+  if [ -x "$SCAN" ] && ! "$SCAN" "$VAULT_ROOT"; then
+    echo "ABORT: precommit-scan blocked the commit — staged content kept for review"
+    exit 0
+  fi
+  git commit -q -m "auto: $TS" && echo "committed"
+fi
+
+# 2) Push — OPT-IN only. Auto-push stays OFF until the user enables it, so a
+#    fresh clone never tries to push to the template's upstream. Enable by running
+#    tools/setup-git.sh (points origin at YOUR repo + drops the flag below), or by
+#    exporting VAULT_AUTOPUSH=1. Without opt-in, vault-sync commits locally only.
+AUTOPUSH_FLAG="$SCRIPT_DIR/.autopush-enabled"
+if [ ! -f "$AUTOPUSH_FLAG" ] && [ "${VAULT_AUTOPUSH:-0}" != "1" ]; then
+  echo "auto-push OFF (committed locally only) — enable via tools/setup-git.sh or VAULT_AUTOPUSH=1"
+elif git remote get-url origin >/dev/null 2>&1; then
+  if command -v timeout  >/dev/null 2>&1; then TO="timeout 60"
+  elif command -v gtimeout >/dev/null 2>&1; then TO="gtimeout 60"
+  else TO=""; fi
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+  ( $TO git -C "$VAULT_ROOT" push -q origin "$branch" \
+      && echo "pushed $(date '+%T')" \
+      || echo "WARN: push failed $(date '+%T') (offline/auth?)" ) &
+  disown 2>/dev/null || true
+else
+  echo "WARN: auto-push enabled but no 'origin' remote — run tools/setup-git.sh to point it at your repo"
+fi
+
+echo "-- done $TS --"
+exit 0

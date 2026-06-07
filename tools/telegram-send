@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""telegram-send — fire-and-forget Telegram notifier for out-of-band pings.
+
+Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from a config file. Resolution
+order:
+    1. $TELEGRAM_ENV if set
+    2. telegram.env next to this script
+    3. telegram.env.example next to this script (placeholders only)
+
+Degrades gracefully: if the config is absent or the keys are blank, it prints a
+short notice to stderr and exits non-zero without crashing the caller.
+
+Usage:
+    telegram-send "your message here"
+    echo "msg" | telegram-send -
+"""
+from __future__ import annotations
+
+import os
+import sys
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+
+def config_path() -> Path:
+    env = os.environ.get("TELEGRAM_ENV")
+    if env:
+        return Path(env)
+    real = HERE / "telegram.env"
+    if real.exists():
+        return real
+    return HERE / "telegram.env.example"
+
+
+def load_env(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        v = v.strip()
+        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            v = v[1:-1]
+        out[k.strip()] = v
+    return out
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        print("usage: telegram-send '<message>'", file=sys.stderr)
+        return 2
+    msg = argv[1]
+    if msg == "-":
+        msg = sys.stdin.read()
+    env = load_env(config_path())
+    token = env.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = env.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        print("telegram-send: not configured (set TELEGRAM_BOT_TOKEN + "
+              "TELEGRAM_CHAT_ID in telegram.env) — skipping", file=sys.stderr)
+        return 1
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": msg[:4000]}).encode()
+    try:
+        with urllib.request.urlopen(url, data=data, timeout=10) as r:
+            r.read()
+    except Exception as e:
+        print(f"telegram-send: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

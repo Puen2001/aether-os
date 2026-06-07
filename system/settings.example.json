@@ -1,0 +1,98 @@
+{
+  "permissions": {
+    "allow": [],
+    "defaultMode": "default"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "system/hooks/gateguard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "system/hooks/dispatch-trace.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "system/hooks/dispatch-trace.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "system/hooks/dispatch-trace.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "system/hooks/vault-sync.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "system/hooks/memory-proposals-resume.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "system/hooks/memory-sweep-due.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "system/hooks/memory-propose.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "python3 tools/statusline.py",
+    "padding": 0,
+    "refreshInterval": 10
+  },
+  "theme": "auto",
+  "verbose": false
+}

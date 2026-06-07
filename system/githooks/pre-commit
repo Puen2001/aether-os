@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# pre-commit — fail-closed secret/IP gate for manual commits.
+#
+# Activate once per clone:   git config core.hooksPath system/githooks
+# Then every `git commit` runs the same scan vault-sync uses on its auto-commit.
+#
+# Delegates to tools/precommit-scan, which scans staged added lines for
+# secret-key patterns (repo-wide) and the user denylist (shareable zones only).
+# A hit aborts the commit; nothing is recorded.
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+SCAN="$REPO_ROOT/tools/precommit-scan"
+
+[ -x "$SCAN" ] || exit 0   # no scanner present -> do not block
+
+if ! "$SCAN" "$REPO_ROOT"; then
+  echo "" >&2
+  echo "pre-commit: secret/IP scan failed — commit aborted." >&2
+  echo "Review the DENY lines above, unstage the offending content, and retry." >&2
+  exit 1
+fi
+exit 0

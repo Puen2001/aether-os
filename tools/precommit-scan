@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# precommit-scan — abort a commit if staged content matches a universal
+# secret-key pattern or a user-defined denylist term.
+#
+# Usage:   precommit-scan <repo-root>
+# Exit:    0 clean   ·   1 hits found (details on stderr)
+#
+# Reads two pattern sources, either may be absent:
+#   1. precommit-patterns.txt   (egrep, committed, universal secret-keys)
+#        sits next to this script. Scanned REPO-WIDE. No secret belongs anywhere.
+#   2. system/denylist.txt      (literal, gitignored, private fingerprints)
+#        Scanned in the SHAREABLE doctrine zones ONLY (the first vault's
+#        concepts/entities/analysis/sources). Employer/client/private terms are
+#        legitimate in private vaults, so they are only a leak inside the
+#        shareable layer.
+#
+# Only scans ADDED/MODIFIED lines in the staged diff — does not warn about
+# matches in unchanged content (those were already committed in the past).
+#
+# Safe to call manually before any commit, and from a sync script.
+set -uo pipefail
+
+ROOT="${1:?usage: precommit-scan <repo-root>}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PATTERNS="$SCRIPT_DIR/precommit-patterns.txt"
+DENYLIST="$ROOT/system/denylist.txt"
+
+# Skip the pattern/denylist files themselves — their contents are *meant* to
+# look like secrets, and scanning them would self-trip on every edit.
+SCAN_EXCLUDE=(
+  ":(exclude)tools/precommit-patterns.txt"
+  ":(exclude)system/denylist.txt"
+  ":(exclude)system/denylist.example.txt"
+)
+
+# Shareable doctrine zones — the ONLY place the user denylist (private
+# fingerprints) is enforced. Such terms are legitimate in private vaults
+# (vault2/vault3) and in the first vault's non-shareable subfolders, so the
+# denylist is scoped to the shareable doctrine layer. Secret-key patterns scan
+# repo-wide (no secret belongs anywhere).
+SHARE_ZONES=(vaults/vault1/concepts vaults/vault1/entities vaults/vault1/analysis vaults/vault1/sources)
+
+added_lines() {
+  # $@ = pathspec(s); prints added/modified staged lines (no diff headers, no removals)
+  git -C "$ROOT" diff --cached -U0 -- "$@" 2>/dev/null \
+    | grep -E '^\+[^+]' | sed 's/^+//'
+}
+
+# Repo-wide added lines drive the secret-key scan; the shareable-zone subset
+# drives the denylist scan. SHARE ⊆ repo, so if repo-wide is empty there is
+# nothing to do.
+ADDED_ALL=$(added_lines . "${SCAN_EXCLUDE[@]}")
+[ -n "$ADDED_ALL" ] || exit 0
+ADDED_SHARE=$(added_lines "${SHARE_ZONES[@]}" "${SCAN_EXCLUDE[@]}")
+
+hits=0
+report(){ echo "DENY: $1" >&2; hits=$((hits+1)); }
+
+strip_comment_and_trail(){
+  local s="$1"
+  s="${s%%#*}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+# --- universal secret-key patterns (egrep) -------------------------------
+if [ -f "$PATTERNS" ]; then
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    case "$raw" in ''|\#*) continue ;; esac
+    pat=$(strip_comment_and_trail "$raw")
+    [ -z "$pat" ] && continue
+    if printf '%s\n' "$ADDED_ALL" | grep -Eq -- "$pat"; then
+      report "secret-key pattern matched: $pat"
+    fi
+  done < "$PATTERNS"
+fi
+
+# --- user denylist (literal, case-insensitive; shareable zones only) ---------
+if [ -f "$DENYLIST" ] && [ -n "$ADDED_SHARE" ]; then
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    case "$raw" in ''|\#*) continue ;; esac
+    term=$(strip_comment_and_trail "$raw")
+    [ -z "$term" ] && continue
+    if printf '%s\n' "$ADDED_SHARE" | grep -Fiq -- "$term"; then
+      report "denylist term matched in shareable zone: $term"
+    fi
+  done < "$DENYLIST"
+fi
+
+[ "$hits" -eq 0 ] && exit 0
+
+echo "" >&2
+echo "Staged files (review and unstage before next sync):" >&2
+git -C "$ROOT" diff --cached --name-only | sed 's/^/  /' >&2
+echo "" >&2
+echo "To unstage everything: git -C \"$ROOT\" reset" >&2
+exit 1
