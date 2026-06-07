@@ -30,6 +30,27 @@ jobs:
             || { echo "FAIL: sweep did not flag the stale example"; exit 1; }
           echo "memory contracts OK"
 
+      - name: Memory engine — dedup + typed edges (v0.1.1)
+        run: |
+          set -e
+          tmp="$(mktemp -d)"
+          # short-window dedup: identical content, two sessions -> one pending file
+          printf '{"role":"user","content":"same note"}\n' > "$tmp/t.jsonl"
+          python3 system/memory/propose.py record --transcript "$tmp/t.jsonl" --session s1
+          python3 system/memory/propose.py record --transcript "$tmp/t.jsonl" --session s2
+          n="$(python3 system/memory/propose.py list | head -1)"
+          [ "$n" = "1" ] || { echo "FAIL: dedup expected 1 pending, got $n"; exit 1; }
+          rm -f system/memory/pending/*.json
+          # typed edges + duplicate detection
+          ent="$(mktemp -d)"
+          printf -- '---\ntitle: One\nconfidence: high\nexpires_after_check: 2099-01-01\n---\nsame body\n' > "$ent/one.md"
+          printf -- '---\ntitle: Two\nconfidence: high\nexpires_after_check: 2099-01-01\n---\nsame body\n' > "$ent/two.md"
+          printf -- '---\ntitle: New\nconfidence: high\nexpires_after_check: 2099-01-01\nsupersedes: One\n---\nreplaces one\n' > "$ent/new.md"
+          out="$(python3 system/memory/sweep.py --dry-run "$ent")"
+          echo "$out" | grep -q "'flagged': 2" || { echo "FAIL: expected 2 flagged (dup pair incl. superseded), got: $out"; exit 1; }
+          python3 system/memory/sweep.py "$ent" | grep -q "superseded by new" || { echo "FAIL: supersedes not reported"; exit 1; }
+          echo "dedup + typed edges OK"
+
       - name: Pre-commit gate blocks a planted secret
         run: |
           printf 'aws_key = AKIAIOSFODNN7EXAMPLE\n' > planted_secret.txt

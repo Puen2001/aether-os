@@ -23,6 +23,7 @@ import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PENDING_DIR = os.path.join(HERE, "pending")
+DEDUP_WINDOW_SEC = 600  # skip re-queuing identical content within 10 minutes
 
 
 def _today():
@@ -62,9 +63,46 @@ def _condense(transcript_path, limit=12):
     return hints[-limit:]
 
 
+def _content_hash(hints):
+    return hashlib.sha256("\n".join(hints).encode("utf-8")).hexdigest() if hints else ""
+
+
+def _recent_duplicate(content_hash, now):
+    """True if a pending record already carries this content_hash within the window.
+    Deterministic short-window dedup (no model call) — idea adapted from agentmemory's
+    SHA-256 dedup, kept file-based and stdlib-only. Empty content never dedups."""
+    if not content_hash:
+        return False
+    try:
+        for f in os.listdir(PENDING_DIR):
+            if not f.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(PENDING_DIR, f), encoding="utf-8") as fh:
+                    rec = json.load(fh)
+            except Exception:
+                continue
+            if rec.get("content_hash") != content_hash:
+                continue
+            try:
+                prev = datetime.datetime.fromisoformat(rec.get("recorded_at", ""))
+            except Exception:
+                return True  # same content, unknown time -> treat as duplicate
+            if (now - prev).total_seconds() <= DEDUP_WINDOW_SEC:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def cmd_record(args):
     try:
         os.makedirs(PENDING_DIR, exist_ok=True)
+        hints = _condense(args.transcript) if args.transcript else []
+        chash = _content_hash(hints)
+        now = datetime.datetime.now()
+        if _recent_duplicate(chash, now):
+            return 0  # identical content already queued within the window — skip
         sid = args.session or hashlib.sha1(
             (args.transcript or _today()).encode()
         ).hexdigest()[:12]
@@ -72,8 +110,9 @@ def cmd_record(args):
         rec = {
             "session": sid,
             "transcript_path": args.transcript,
-            "recorded_at": _today(),
-            "hints": _condense(args.transcript) if args.transcript else [],
+            "recorded_at": now.isoformat(timespec="seconds"),
+            "content_hash": chash,
+            "hints": hints,
         }
         with open(os.path.join(PENDING_DIR, safe + ".json"), "w", encoding="utf-8") as fh:
             json.dump(rec, fh, indent=2)

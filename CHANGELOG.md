@@ -4,6 +4,17 @@ All notable changes to AETHER OS are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## [0.1.1] — 2026-06-07
+
+### Added
+- Memory engine: **deterministic short-window SHA-256 dedup** in `propose.py` — identical session
+  content recorded within 10 minutes is queued once (no model call).
+- Memory sweep: **duplicate-entry detection** (body content-hash) and **typed relationship edges**
+  in entry frontmatter — `supersedes` (flags the superseded entry stale), `contradicts` (flags both
+  for review), `extends` (informational). The `'flagged': N` hook contract is unchanged.
+
+_(Ideas adapted clean-room from a tool-hunt of agentmemory; no code lifted.)_
+
 ## [0.1.0] — 2026-06-07
 
 First public release — the free, MIT-licensed AETHER OS scaffold.

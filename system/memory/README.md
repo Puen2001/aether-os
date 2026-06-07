@@ -27,6 +27,10 @@ confidence: high | med | low      # high = you stated/confirmed it; low = the AI
 expires_after_check: YYYY-MM-DD    # a freshness horizon, or a hard real-world date
 created: YYYY-MM-DD
 source: <where this came from>
+# optional typed relationships to another entry (by filename stem or title):
+supersedes: <name|title>           # this entry replaces that one -> that one is flagged stale
+contradicts: <name|title>          # the two conflict -> both flagged for review
+extends:    <name|title>           # informational edge (not flagged)
 ---
 
 <the fact, in one or two lines>
@@ -39,6 +43,13 @@ source: <where this came from>
 - **expired** — `expires_after_check` is in the past.
 - **low confidence** — `confidence: low` (the AI's own inference; verify before relying).
 - **ungoverned** — missing `confidence` or `expires_after_check`.
+- **superseded** — another entry declares `supersedes: <this>` (the old one is now stale).
+- **contradicted** — two entries sit on a `contradicts:` edge (both surfaced to reconcile).
+- **duplicate** — two entries share the same body content-hash (SHA-256, whitespace-insensitive).
+
+The `propose.py` queue also dedups deterministically: identical session content recorded within a
+10-minute window is queued once, not twice (no model call). Typed edges + content-hash dedup are
+ideas adapted from agentmemory, kept file-based and stdlib-only.
 
 ```bash
 python3 system/memory/sweep.py            # full report + records the run date
