@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template for the Telegram voice bridge.
+
+  Replace the placeholders before installing (launchd does not expand ~ or env
+  vars in these fields):
+    <REPO_ROOT>  absolute path to your AETHER OS checkout
+    <HOME>       your home directory (e.g. /Users/you)
+
+  The interpreter below assumes the voice venv created during setup:
+    python3 -m venv ~/.config/personal-ai/voice/.venv
+    ~/.config/personal-ai/voice/.venv/bin/pip install -r <REPO_ROOT>/voice/requirements-telegram.txt
+
+  Secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USERS, optional
+  ELEVENLABS_API_KEY) live in ~/.config/personal-ai/voice/secrets.env —
+  chmod 600 it and keep it out of git.
+
+  Install:
+    cp telegram-bridge.plist.example \
+       ~/Library/LaunchAgents/com.personal-ai.telegram-bridge.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.personal-ai.telegram-bridge.plist
+    launchctl enable gui/$(id -u)/com.personal-ai.telegram-bridge
+
+  Stop / restart / unload:
+    launchctl kickstart -k gui/$(id -u)/com.personal-ai.telegram-bridge   # restart
+    launchctl bootout    gui/$(id -u)/com.personal-ai.telegram-bridge     # stop+unload
+
+  macOS TCC note (Sequoia and later): launchd-spawned processes do NOT inherit
+  Terminal's Desktop/Documents grants. If your repo lives under ~/Desktop or
+  ~/Documents and telegram.log shows "Operation not permitted" on repo reads,
+  grant Full Disk Access to the venv python interpreter (System Settings ->
+  Privacy & Security -> Full Disk Access -> +, navigate to
+  <HOME>/.config/personal-ai/voice/.venv/bin/python), or move the repo outside
+  TCC-protected folders.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.personal-ai.telegram-bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string><HOME>/.config/personal-ai/voice/.venv/bin/python</string>
+        <string><REPO_ROOT>/voice/telegram-bridge.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string><HOME>/.config/personal-ai/voice/telegram.log</string>
+    <key>StandardErrorPath</key>
+    <string><HOME>/.config/personal-ai/voice/telegram.log</string>
+
+    <key>WorkingDirectory</key>
+    <string><REPO_ROOT>/voice</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string><HOME></string>
+        <key>PAI_ROOT</key>
+        <string><REPO_ROOT></string>
+    </dict>
+</dict>
+</plist>

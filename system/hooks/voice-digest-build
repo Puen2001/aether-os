@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""voice-digest-build — extract meaningful exchanges from raw voice transcripts.
+
+The raw transcripts (system/voice/.transcripts-raw/voice-YYYY-MM-DD.md) are the
+source of truth but live in a dot-prefixed dir so Obsidian doesn't index their
+filler. This script lifts the substantive turn-pairs into
+system/voice/digest/voice-YYYY-MM-DD.md, which Obsidian DOES index (and which
+the KB indexes as the episodic corpus — see system/kb/).
+
+Filtering is deterministic and conservative — no LLM calls:
+  - Drop turn-pairs where the user line is empty or a bare greeting
+  - Drop turn-pairs where the assistant's reply matches a canned phrase
+  - Keep everything else verbatim with original timestamps
+
+Transcript contract: the voice runner writes turn-pairs as
+  ## HH:MM:SS
+  **you**: <user line>
+  **assistant**: <reply>
+
+Usage:
+    voice-digest-build                    # digest yesterday's transcript
+    voice-digest-build 2026-01-15         # digest a specific date
+    voice-digest-build --all              # digest every raw transcript present
+"""
+from __future__ import annotations
+import argparse
+import datetime as dt
+import os
+import re
+import sys
+from pathlib import Path
+
+# Repo root resolves from this script's own location (system/hooks/ → root);
+# override with the PAI_ROOT env var if the tree lives elsewhere.
+ROOT = Path(os.environ.get("PAI_ROOT") or Path(__file__).resolve().parents[2])
+RAW_DIR = ROOT / "system" / "voice" / ".transcripts-raw"
+DIGEST_DIR = ROOT / "system" / "voice" / "digest"
+
+# Bare-greeting user turns carry no content. The final alternative drops turns
+# that are just the assistant's name (a wake-word echo); set PAI_ASSISTANT_NAME
+# to whatever you named yours.
+ASSISTANT_NAME = os.environ.get("PAI_ASSISTANT_NAME", "assistant")
+GREETING_USER = re.compile(
+    r"^\s*(hi+|hello+|hey+|good\s*(morning|afternoon|evening|night)|thanks?|thank\s*you"
+    r"|goodbye|good\s*bye|bye+|ok+|okay|alright|"
+    + re.escape(ASSISTANT_NAME) +
+    r"[\.\?!]?)\s*[\.\?!]*\s*$",
+    re.IGNORECASE,
+)
+
+# Canned assistant replies that carry no content (stock startup / goodbye /
+# error lines). Edit to match the phrases YOUR voice runner actually emits —
+# anything matching here is dropped from the digest.
+CANNED_ASSISTANT = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"^\s*voice\s*assistant\s*online",
+        r"^\s*good\s*(morning|afternoon|evening|night)\.?\s*$",
+        r"^\s*goodbye\.?\s*$",
+        r"^\s*i'?m\s*having\s*trouble\s*reaching\s*(my\s*brain|the\s*router)",
+        r"^\s*how\s*can\s*i\s*help\??\s*$",
+    )
+]
+
+TURN_RE = re.compile(
+    r"^##\s+(?P<time>\d{2}:\d{2}:\d{2})\s*\n+"
+    r"\*\*you\*\*:\s*(?P<you>.*?)\n+"
+    r"\*\*assistant\*\*:\s*(?P<assistant>.*?)(?=\n+##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def parse_turns(raw: str):
+    """Yield (time, you, assistant) tuples from a raw transcript body."""
+    for m in TURN_RE.finditer(raw):
+        yield m.group("time"), m.group("you").strip(), m.group("assistant").strip()
+
+
+def keep(you: str, reply: str) -> bool:
+    if not you or GREETING_USER.match(you):
+        return False
+    if any(p.match(reply) for p in CANNED_ASSISTANT):
+        return False
+    return True
+
+
+def render_digest(date_str: str, kept_turns) -> str:
+    head = (
+        "---\n"
+        f"title: voice digest — {date_str}\n"
+        "type: digest\n"
+        "tags: [voice, digest]\n"
+        f"sources: [system/voice/.transcripts-raw/voice-{date_str}.md]\n"
+        "---\n\n"
+        f"# voice digest — {date_str}\n\n"
+    )
+    if not kept_turns:
+        return head + "_no substantive exchanges this day._\n"
+    body = []
+    for t, you, reply in kept_turns:
+        body.append(f"## {t}\n\n**you**: {you}\n\n**assistant**: {reply}\n")
+    return head + "\n".join(body)
+
+
+def digest_one(raw_file: Path) -> Path | None:
+    date_str = raw_file.stem.replace("voice-", "")
+    body = raw_file.read_text(encoding="utf-8", errors="replace")
+    turns = list(parse_turns(body))
+    kept = [(t, y, a) for (t, y, a) in turns if keep(y, a)]
+    DIGEST_DIR.mkdir(parents=True, exist_ok=True)
+    out = DIGEST_DIR / f"voice-{date_str}.md"
+    out.write_text(render_digest(date_str, kept), encoding="utf-8")
+    print(f"{raw_file.name}: {len(turns)} turns → {len(kept)} kept → {out.relative_to(ROOT)}")
+    return out
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("date", nargs="?", help="YYYY-MM-DD (default: yesterday)")
+    ap.add_argument("--all", action="store_true", help="digest every raw transcript")
+    args = ap.parse_args(argv)
+
+    if args.all:
+        files = sorted(RAW_DIR.glob("voice-*.md"))
+    else:
+        date_str = args.date or (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        files = [RAW_DIR / f"voice-{date_str}.md"]
+
+    missing = [f for f in files if not f.exists()]
+    if missing and not args.all:
+        print(f"no transcript: {missing[0]}", file=sys.stderr)
+        return 1
+
+    for f in files:
+        if f.exists():
+            digest_one(f)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

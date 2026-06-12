@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""tunnel — spinning colorful tunnel of rings, ported to terminal.
+
+Reference: https://codepen.io/grayghostvisuals/pen/nBLrpK
+72 dashed rings stacked at 5° increments around X axis (forming a
+torus shell), all rotating around Y axis at one revolution per 9s.
+
+Rendered with braille codepoints for sub-cell resolution (2x4 dots per
+cell → 25x10 pane shows 50x40 sub-pixels) and ANSI 24-bit color so each
+ring keeps its HSL hue.
+"""
+import math
+import shutil
+import signal
+import sys
+import time
+
+# ── Scene constants ─────────────────────────────────────────────────
+NUM_RINGS       = 72
+RING_STEP_RAD   = math.radians(5)        # angle between rings
+PTS_PER_RING    = 60                     # samples drawn per ring
+FRAME_INTERVAL  = 0.05                   # seconds (≈20 fps)
+PHI_STEP        = (2 * math.pi) * FRAME_INTERVAL / 9.0  # one rev / 9s
+
+R_RING = 1.0   # ring radius (3D units)
+TY     = 1.7   # translateY equivalent — 200px in CSS, dimensionless here
+K2     = 4.0   # camera z-distance
+
+# ── Braille bit positions ───────────────────────────────────────────
+BRAILLE_BITS = {
+    (0, 0): 0, (1, 0): 3,
+    (0, 1): 1, (1, 1): 4,
+    (0, 2): 2, (1, 2): 5,
+    (0, 3): 6, (1, 3): 7,
+}
+
+# ── Precompute trig & colors ────────────────────────────────────────
+RING_COS = [math.cos(i * RING_STEP_RAD) for i in range(NUM_RINGS)]
+RING_SIN = [math.sin(i * RING_STEP_RAD) for i in range(NUM_RINGS)]
+
+ALPHA_COS = [math.cos(k / PTS_PER_RING * 2 * math.pi) for k in range(PTS_PER_RING)]
+ALPHA_SIN = [math.sin(k / PTS_PER_RING * 2 * math.pi) for k in range(PTS_PER_RING)]
+
+def _hsl_rgb(h_deg, s=1.0, l=0.5):
+    """HSL → 8-bit RGB. h in degrees, s/l in [0,1]."""
+    h = (h_deg % 360) / 360.0
+    if s == 0:
+        v = int(l * 255)
+        return v, v, v
+    q = l * (1 + s) if l < 0.5 else l + s - l * s
+    p = 2 * l - q
+    def htr(t):
+        t = (t + 1) % 1
+        if t < 1/6: return p + (q - p) * 6 * t
+        if t < 1/2: return q
+        if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+        return p
+    r = htr(h + 1/3); g = htr(h); b = htr(h - 1/3)
+    return int(r * 255), int(g * 255), int(b * 255)
+
+# Each ring's hue = i * 5 deg (matching CSS @for loop)
+RING_COLOR = []
+for i in range(NUM_RINGS):
+    r, g, b = _hsl_rgb(i * 5)
+    RING_COLOR.append(f"\x1b[38;2;{r};{g};{b}m")
+
+# ── Cleanup on exit ─────────────────────────────────────────────────
+def restore(*_):
+    sys.stdout.write("\x1b[?25h\x1b[0m\n")
+    sys.exit(0)
+
+for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(sig, restore)
+
+sys.stdout.write("\x1b[?25l\x1b[2J")
+sys.stdout.flush()
+
+# ── Main render loop ────────────────────────────────────────────────
+phi = 0.0
+while True:
+    cols, rows = shutil.get_terminal_size((25, 10))
+    W, H = cols, rows
+    PW, PH = W * 2, H * 4
+    N = PW * PH
+
+    z_buf  = [-1e9] * N
+    ring_b = [-1]   * N
+
+    # Projection scale — leave a margin so rings don't clip the edges
+    K1 = min(PW * 0.42, PH * 0.42)
+
+    cos_phi = math.cos(phi)
+    sin_phi = math.sin(phi)
+    PW_half = PW * 0.5
+    PH_half = PH * 0.5
+
+    for ri in range(NUM_RINGS):
+        crx = RING_COS[ri]
+        srx = RING_SIN[ri]
+        for k in range(PTS_PER_RING):
+            ca = ALPHA_COS[k]
+            sa = ALPHA_SIN[k]
+
+            # CSS transform: rotateX(ri*5°) translateY(-TY)
+            # applied to ring point (R cos α, R sin α, 0)
+            #   step 1, translate-Y: (R cos α, R sin α - TY, 0)
+            #   step 2, rotate-X by (ri*5°):
+            #     y' = (R sin α - TY) * crx
+            #     z' = (R sin α - TY) * srx
+            ly = R_RING * sa - TY
+            x_w = R_RING * ca
+            y_w = ly * crx
+            z_w = ly * srx
+
+            # Tunnel-wide rotateY(phi)
+            x_c =  x_w * cos_phi + z_w * sin_phi
+            z_c = -x_w * sin_phi + z_w * cos_phi
+            y_c =  y_w
+
+            depth = z_c + K2
+            if depth <= 0.5:
+                continue
+            ooz = 1.0 / depth
+
+            xp = int(PW_half + K1 * ooz * x_c)
+            yp = int(PH_half - K1 * ooz * y_c)
+
+            if 0 <= xp < PW and 0 <= yp < PH:
+                idx = yp * PW + xp
+                if ooz > z_buf[idx]:
+                    z_buf[idx]  = ooz
+                    ring_b[idx] = ri
+
+    # ── Pack sub-pixel buffer into braille cells, batching colors ────
+    out = ["\x1b[H"]
+    last_color = ""
+    for r in range(H):
+        line = []
+        base_y = r * 4
+        for c in range(W):
+            bits = 0
+            cell_ring = -1
+            cell_z    = -1e9
+            base_x    = c * 2
+            for dy in range(4):
+                py = base_y + dy
+                row_off = py * PW
+                for dx in range(2):
+                    pidx = row_off + base_x + dx
+                    if ring_b[pidx] >= 0:
+                        bits |= 1 << BRAILLE_BITS[(dx, dy)]
+                        if z_buf[pidx] > cell_z:
+                            cell_z    = z_buf[pidx]
+                            cell_ring = ring_b[pidx]
+            if bits:
+                color = RING_COLOR[cell_ring]
+                if color != last_color:
+                    line.append(color)
+                    last_color = color
+                line.append(chr(0x2800 + bits))
+            else:
+                line.append(' ')
+        line.append("\x1b[K")
+        out.append("".join(line))
+        if r < H - 1:
+            out.append("\n")
+    out.append("\x1b[0m")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+
+    phi += PHI_STEP
+    if phi >= 2 * math.pi:
+        phi -= 2 * math.pi
+    time.sleep(FRAME_INTERVAL)

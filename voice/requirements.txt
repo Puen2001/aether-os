@@ -1,0 +1,11 @@
+# voice pack — python deps for capture.py, vad-capture.py, kokoro-synth.py.
+# Install into the runtime venv (see README.md "Setup"):
+#   python3 -m venv ~/.config/personal-ai/voice/.venv
+#   ~/.config/personal-ai/voice/.venv/bin/pip install -r voice/requirements.txt
+kokoro-onnx     # local TTS engine (kokoro-synth.py)
+numpy           # audio buffers (vad-capture.py)
+onnxruntime     # Silero VAD inference (vad-capture.py; also an openwakeword dep)
+openwakeword    # wake-word detection (capture.py, optional at runtime)
+pynput          # global hotkey listener (capture.py)
+sounddevice     # mic input streams (capture.py, vad-capture.py)
+soundfile       # WAV writing (kokoro-synth.py)

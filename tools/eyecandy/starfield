@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""starfield — warp-drive starfield in braille sub-pixels, brass-on-charcoal.
+
+Stars stream from the center outward (1/z projection); as a star passes the
+camera it respawns far away. Brightness ramps brass→warm-white with nearness.
+Same braille 2x4 framebuffer + per-cell color batching as `donut`. Auto-sizes to
+the pane, ~20fps, exits clean on any terminating signal.
+"""
+import math
+import random
+import shutil
+import signal
+import sys
+import time
+
+FRAME = 0.05
+NUM_STARS = 150
+SPEED = 0.5
+BRAILLE_BITS = {
+    (0, 0): 0, (1, 0): 3,
+    (0, 1): 1, (1, 1): 4,
+    (0, 2): 2, (1, 2): 5,
+    (0, 3): 6, (1, 3): 7,
+}
+
+
+def restore(*_):
+    sys.stdout.write("\x1b[?25h\x1b[0m\n")
+    sys.exit(0)
+
+
+for _s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(_s, restore)
+
+
+def _shade(t):  # brass (201,162,75) → warm white (255,245,220)
+    r = int(201 + (255 - 201) * t)
+    g = int(162 + (245 - 162) * t)
+    b = int(75 + (220 - 75) * t)
+    return f"\x1b[38;2;{r};{g};{b}m"
+
+
+RAMP = [_shade(i / 15) for i in range(16)]
+
+
+def spawn():
+    return [random.uniform(-1, 1), random.uniform(-1, 1), random.uniform(0.15, 1.0)]
+
+
+stars = [spawn() for _ in range(NUM_STARS)]
+
+sys.stdout.write("\x1b[?25l\x1b[2J")
+sys.stdout.flush()
+
+while True:
+    cols, rows = shutil.get_terminal_size((25, 10))
+    W, H = cols, rows
+    PW, PH = W * 2, H * 4
+    N = PW * PH
+    buf = [-1] * N
+    cx, cy = PW * 0.5, PH * 0.5
+    K = min(PW, PH) * 0.55
+
+    for st in stars:
+        st[2] -= SPEED * FRAME
+        if st[2] <= 0.04:
+            st[0], st[1], st[2] = random.uniform(-1, 1), random.uniform(-1, 1), 1.0
+        ooz = 1.0 / st[2]
+        xp = int(cx + st[0] * ooz * K * 0.35)
+        yp = int(cy + st[1] * ooz * K * 0.35)
+        if 0 <= xp < PW and 0 <= yp < PH:
+            bright = int((1.0 - st[2]) * 15)
+            idx = yp * PW + xp
+            if bright > buf[idx]:
+                buf[idx] = bright
+
+    out = ["\x1b[H"]
+    last = ""
+    for r in range(H):
+        line = []
+        by = r * 4
+        for c in range(W):
+            bits = 0
+            best = -1
+            bx = c * 2
+            for dy in range(4):
+                ro = (by + dy) * PW
+                for dx in range(2):
+                    p = ro + bx + dx
+                    if buf[p] >= 0:
+                        bits |= 1 << BRAILLE_BITS[(dx, dy)]
+                        if buf[p] > best:
+                            best = buf[p]
+            if bits:
+                col = RAMP[best]
+                if col != last:
+                    line.append(col)
+                    last = col
+                line.append(chr(0x2800 + bits))
+            else:
+                line.append(" ")
+        line.append("\x1b[K")
+        out.append("".join(line))
+        if r < H - 1:
+            out.append("\n")
+    out.append("\x1b[0m")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+    time.sleep(FRAME)

@@ -14,7 +14,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Free forever" src="https://img.shields.io/badge/free-forever-brightgreen">
   <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-success">
-  <img alt="Runs on Claude Code" src="https://img.shields.io/badge/runs%20on-Claude%20Code-5A4FCF">
+  <img alt="Runs on Claude Code or any LLM" src="https://img.shields.io/badge/runs%20on-Claude%20Code%20or%20any%20LLM-5A4FCF">
   <img alt="Setup: one command" src="https://img.shields.io/badge/setup-one%20command-orange">
   <a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-ff69b4"></a>
 </p>
@@ -23,9 +23,10 @@
 
 **The personal AI that remembers you — and keeps your worlds apart.**
 
-AETHER OS gives your Claude Code assistant a careful, *governed* memory of who you are — and a
+AETHER OS gives your AI assistant a careful, *governed* memory of who you are — and a
 built-in **IP-clean filter** so your personal, employer, and client worlds never bleed into each
-other. One assistant. Many vaults. No bleed. **MIT-licensed. Free forever.**
+other. One assistant. Many vaults. No bleed. Runs on Claude Code **or any LLM** (local or hosted).
+**MIT-licensed. Free forever.**
 
 ```bash
 git clone https://github.com/Puen2001/aether-os && cd aether-os && claude
@@ -123,8 +124,17 @@ aether-os/
 
 ## Quickstart
 
-**Requires:** [Claude Code](https://docs.claude.com/claude-code). macOS, Linux, or **Windows via
-WSL2**. The harness makes **zero extra model calls** — your only spend is your normal Claude Code usage.
+**Claude Code is not required.** AETHER runs two ways, mix and match:
+
+- **With Claude Code** (the default agent experience). The 11 agents, skills,
+  and hooks use Claude Code's formats. Zero extra model calls — your only spend
+  is your normal Claude Code usage.
+- **On any LLM backend** (no Claude Code). The voice/phone assistant runs on a
+  **free local model** (Ollama, LM Studio) or any OpenAI-compatible API — see
+  [Voice & any-backend setup](#voice--any-backend-setup). The vaults, memory
+  engine, and tools are plain Python/POSIX and need no agent runtime at all.
+
+macOS, Linux, or **Windows via WSL2**.
 
 ### 30-second taste (no setup, no risk)
 ```bash
@@ -134,12 +144,55 @@ In the assistant: **"Read examples/introduction.md and introduce yourself."**
 You'll see the first-run experience against a filled-in persona. (This taste runs with hooks **off** —
 nothing is written, nothing leaves your machine. `./aether init` turns on the memory + gate.)
 
-### Make it yours (one command)
+> **No Claude Code?** Skip the taste above and jump to
+> [Voice & any-backend setup](#voice--any-backend-setup) — talk to AETHER over a
+> local Ollama model instead.
+
+### Make it yours
 ```bash
 ./aether init        # copies templates, sets exec bits, wires the pre-commit gate — ~5s, idempotent
+./aether intro       # opens introduction.md in your editor — name yourself + your assistant
 ```
-Then open the assistant **from this folder** (`claude`) and fill in `introduction.md` with your own
-details. Run `./aether doctor` any time to check your setup; `./aether reset` clears the example.
+`./aether intro` is where you personalize: set **"Name / what to call you"** and how you want your
+assistant to work. Then open the assistant **from this folder** (`claude`, or `./voice/voice.sh` for
+any backend) — it reads `introduction.md` on first run. Run `./aether doctor` any time to check your
+setup; `./aether reset` clears the example.
+
+### Your own commands (one per AI)
+
+`aether` is the default command, but you can make your own — handy if you use more than one AI and
+want a separate command for each (like `myai-local`, `myai-gpt`, `myai-claude`):
+
+```bash
+./aether launcher            # asks a name + which backend, writes launchers/<name>,
+                             # offers to put it on your PATH, then asks if you want another
+```
+
+Each generated command opens a terminal chat on its backend (Claude Code, a local Ollama model, a
+hosted API, or any chat CLI), personalized from your `introduction.md`. They're plain scripts under
+`launchers/` — edit them freely.
+
+### Voice & any-backend setup
+
+Talk to AETHER with no Claude Code at all. Point the brain at a free local model:
+
+```bash
+# 1. a brain backend — free + local via Ollama (or any OpenAI-compatible API)
+ollama pull llama3.1
+
+# 2. speech-to-text
+brew install whisper-cpp        # or build https://github.com/ggml-org/whisper.cpp
+
+# 3. configure + run
+cp voice/config.env.example voice/config.env   # defaults to local Ollama + the `say` voice
+./voice/voice.sh                                # press Enter to talk
+```
+
+Other backends (set `BRAIN_PROVIDER` in `voice/config.env`): a hosted API
+(`api` + `BRAIN_API_KEY` in `~/.config/personal-ai/voice/secrets.env`), any chat
+CLI (`cmd`), or the Claude Code / Codex CLI. Phone access via
+`voice/telegram-bridge.py`. Details in
+[`system/brain/README.md`](system/brain/README.md).
 
 ### Windows
 Install [WSL2](https://aka.ms/wsl), then run the steps above inside your WSL2 Linux home (not a

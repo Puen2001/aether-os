@@ -4,9 +4,9 @@
 Renders:  <Model> · <bar> NN% · <dir> · <branch>● · 5h NN% 7d NN% · $cost · <elapsed>
 
 Segments auto-omit when their data is absent (rate_limits before first call,
-cost=0, no git repo, etc.). Reads the statusLine JSON contract on stdin,
-defensively. Pure stdout, stdlib only, fast. Git state comes from one
-`status --porcelain=v2 --branch` call, timeout-guarded.
+cost=0, no git repo, etc.). Reads the statusLine JSON contract on stdin
+(Claude Code v2.1.x), defensively. Pure stdout, stdlib only, fast. Git state
+comes from one `status --porcelain=v2 --branch` call, timeout-guarded.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def lvl_color(pct: float) -> str:
     return GREEN
 
 
-def bar(pct: float, cells: int = 3) -> str:
+def bar(pct: float, cells: int = 6) -> str:
     pct = max(0.0, min(100.0, pct))
     filled = int(round(pct / 100 * cells))
     col = lvl_color(pct)

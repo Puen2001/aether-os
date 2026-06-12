@@ -1,0 +1,8 @@
+# Knowledge-base pack — install into a plain virtualenv:
+#   python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+#
+# Not pip-installable but required for recall.py's keyword leg:
+#   ripgrep (`rg`) on PATH — brew install ripgrep / apt install ripgrep
+lancedb
+sentence-transformers
+tantivy

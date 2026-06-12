@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""lorenz — the Lorenz strange attractor traced in braille, slowly rotating.
+
+Integrates the classic system (σ=10, ρ=28, β=8/3) and keeps a fading trail; the
+whole butterfly yaws slowly for a 3D feel. Trail brightness ramps dim-brass→warm-
+white head-to-tail. Same braille 2x4 framebuffer + per-cell color batching as
+`donut`. Auto-sizes to the pane, ~25fps, exits clean on any terminating signal.
+"""
+import math
+import shutil
+import signal
+import sys
+import time
+
+FRAME = 0.04
+SIGMA, RHO, BETA = 10.0, 28.0, 8.0 / 3.0
+DT = 0.008
+STEPS_PER_FRAME = 14
+TRAIL = 2800
+BRAILLE_BITS = {
+    (0, 0): 0, (1, 0): 3,
+    (0, 1): 1, (1, 1): 4,
+    (0, 2): 2, (1, 2): 5,
+    (0, 3): 6, (1, 3): 7,
+}
+
+
+def restore(*_):
+    sys.stdout.write("\x1b[?25h\x1b[0m\n")
+    sys.exit(0)
+
+
+for _s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(_s, restore)
+
+
+def _shade(t):  # dim brass (120,96,40) → warm white (255,238,200)
+    r = int(120 + (255 - 120) * t)
+    g = int(96 + (238 - 96) * t)
+    b = int(40 + (200 - 40) * t)
+    return f"\x1b[38;2;{r};{g};{b}m"
+
+
+RAMP = [_shade(i / 15) for i in range(16)]
+
+x, y, z = 0.1, 0.0, 0.0
+pts = []
+theta = 0.0
+
+sys.stdout.write("\x1b[?25l\x1b[2J")
+sys.stdout.flush()
+
+while True:
+    for _ in range(STEPS_PER_FRAME):
+        dx = SIGMA * (y - x)
+        dy = x * (RHO - z) - y
+        dz = x * y - BETA * z
+        x += dx * DT
+        y += dy * DT
+        z += dz * DT
+        pts.append((x, y, z))
+    if len(pts) > TRAIL:
+        del pts[: len(pts) - TRAIL]
+
+    cols, rows = shutil.get_terminal_size((25, 10))
+    W, H = cols, rows
+    PW, PH = W * 2, H * 4
+    N = PW * PH
+    buf = [-1] * N
+    cx, cy = PW * 0.5, PH * 0.5
+    scale = min(PW / 58.0, PH / 58.0)
+    theta += 0.012
+    ct, st = math.cos(theta), math.sin(theta)
+
+    n = len(pts)
+    for i in range(n):
+        px, py, pz = pts[i]
+        rx = px * ct - py * st           # yaw about the vertical axis
+        sx = int(cx + rx * scale)
+        sy = int(cy - (pz - 25.0) * scale)
+        if 0 <= sx < PW and 0 <= sy < PH:
+            idx = sy * PW + sx
+            b = int(i / n * 15)          # recency → brightness (head brightest)
+            if b > buf[idx]:
+                buf[idx] = b
+
+    out = ["\x1b[H"]
+    last = ""
+    for r in range(H):
+        line = []
+        by = r * 4
+        for c in range(W):
+            bits = 0
+            best = -1
+            bx = c * 2
+            for dy in range(4):
+                ro = (by + dy) * PW
+                for dx in range(2):
+                    p = ro + bx + dx
+                    if buf[p] >= 0:
+                        bits |= 1 << BRAILLE_BITS[(dx, dy)]
+                        if buf[p] > best:
+                            best = buf[p]
+            if bits:
+                col = RAMP[best]
+                if col != last:
+                    line.append(col)
+                    last = col
+                line.append(chr(0x2800 + bits))
+            else:
+                line.append(" ")
+        line.append("\x1b[K")
+        out.append("".join(line))
+        if r < H - 1:
+            out.append("\n")
+    out.append("\x1b[0m")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+    time.sleep(FRAME)

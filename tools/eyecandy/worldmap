@@ -1,0 +1,752 @@
+#!/usr/bin/env python3
+"""worldmap — multi-layer real-time geo-intelligence console (terminal, Palantir-style).
+
+Base : Natural Earth 1:110m coastlines (braille sub-pixel, dim brass) + an optional
+       day/night terminator wash.
+Live layers (free, NO API key), each toggleable, with pulsing markers + ping rings.
+All glyphs are deliberately East-Asian-NARROW (eaw=N) so the fixed-width braille grid
+never skews on terminals that render ambiguous-width chars as 2 cells:
+  1 quakes     USGS all_day            ◉ / ✸  colored by magnitude
+  2 news       GDELT GEO 2.0           ✚      geo-located world news (empty if unreachable)
+  3 sat (ISS)  wheretheiss.at          ✦      live position + ground-track trail
+  4 disasters  GDACS EVENTS4APP        ▴      cyclones/floods/quakes/volcano by alert level
+  5 day/night  (astronomy, no network) ☼      night-side shading + subsolar point
+
+Interaction:
+  1..5 toggle layer       + / -  zoom        h j k l  pan        r  cycle region
+  ↑↓←→ move cursor        Enter  pin/inspect nearest marker      Esc  unpin
+  a    alerts on/off      L  legend          ?  help             q  quit
+
+NETWORK / PRIVACY: read-only public GETs (USGS, GDELT, ISS, GDACS) — no personal data
+leaves. WORLDMAP_OFFLINE=1 disables ALL network (coastlines + terminator still render).
+Proximity ALERTS are the only outbound write: they send event text to YOUR OWN Telegram
+via the repo's tools/telegram-send. OFF by default; toggle with `a` or
+WORLDMAP_ALERTS=1. Deduped + rate-capped. Set home with WORLDMAP_HOME="lat,lon" (default 0,0).
+
+Data: ~/.config/personal-ai/ne_110m_coastline.geojson (Natural Earth 1:110m, public domain)
+"""
+import json
+import math
+import os
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import threading
+import time
+import tty
+import urllib.request
+from datetime import datetime, timezone
+
+CFG = os.path.expanduser("~/.config/personal-ai")
+DATA = os.path.join(CFG, "ne_110m_coastline.geojson")
+ALERT_STATE = os.path.join(CFG, "worldmap_alerts.json")
+# repo root: PAI_ROOT, else two levels up from this script (tools/eyecandy/..)
+ROOT = os.environ.get("PAI_ROOT") or os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+TELEGRAM = os.path.join(ROOT, "tools", "telegram-send")
+OFFLINE = os.environ.get("WORLDMAP_OFFLINE", "0") == "1"
+TRUE = os.environ.get("COLORTERM") in ("truecolor", "24bit")
+try:
+    _h = os.environ.get("WORLDMAP_HOME", "0,0").split(",")
+    HOME = (float(_h[0]), float(_h[1]))
+except Exception:
+    HOME = (0.0, 0.0)
+
+R = "\x1b[0m"
+BD = "\x1b[1m"
+BITS = {(0, 0): 0, (1, 0): 3, (0, 1): 1, (1, 1): 4,
+        (0, 2): 2, (1, 2): 5, (0, 3): 6, (1, 3): 7}
+
+
+def rgb(r, g, b):
+    return f"\x1b[38;2;{r};{g};{b}m" if TRUE else "\x1b[38;5;137m"
+
+
+COAST = rgb(120, 100, 52)
+COAST_HOT = rgb(220, 190, 120)
+NIGHT = rgb(40, 48, 60)
+INK = rgb(232, 228, 218)
+MUT = rgb(107, 102, 94)
+BRASS = rgb(201, 162, 75)
+HOMEC = rgb(245, 232, 190)
+ARC = rgb(150, 132, 96)
+CURSORC = rgb(245, 232, 190)
+
+_fd = sys.stdin.fileno() if sys.stdin.isatty() else None
+_saved = termios.tcgetattr(_fd) if _fd is not None else None
+
+
+def restore(*_):
+    if _saved is not None:
+        termios.tcsetattr(_fd, termios.TCSADRAIN, _saved)
+    sys.stdout.write("\x1b[?25h\x1b[0m\n")
+    sys.exit(0)
+
+
+for _s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(_s, restore)
+
+
+# ── geo math ─────────────────────────────────────────────────────────────────
+def haversine(a, b):
+    (la1, lo1), (la2, lo2) = a, b
+    r1, r2 = math.radians(la1), math.radians(la2)
+    dla, dlo = math.radians(la2 - la1), math.radians(lo2 - lo1)
+    h = math.sin(dla / 2) ** 2 + math.cos(r1) * math.cos(r2) * math.sin(dlo / 2) ** 2
+    return 2 * 6371.0 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def bearing(a, b):
+    (la1, lo1), (la2, lo2) = a, b
+    r1, r2 = math.radians(la1), math.radians(la2)
+    dlo = math.radians(lo2 - lo1)
+    y = math.sin(dlo) * math.cos(r2)
+    x = math.cos(r1) * math.sin(r2) - math.sin(r1) * math.cos(r2) * math.cos(dlo)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def compass(brg):
+    return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][int((brg + 22.5) % 360 // 45)]
+
+
+def gc_arc(a, b, n=24):
+    (la1, lo1), (la2, lo2) = a, b
+    p1, l1, p2, l2 = map(math.radians, (la1, lo1, la2, lo2))
+    d = 2 * math.asin(min(1.0, math.sqrt(
+        math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin((l2 - l1) / 2) ** 2)))
+    if d == 0:
+        return [a]
+    out = []
+    for i in range(n + 1):
+        f = i / n
+        A, B = math.sin((1 - f) * d) / math.sin(d), math.sin(f * d) / math.sin(d)
+        x = A * math.cos(p1) * math.cos(l1) + B * math.cos(p2) * math.cos(l2)
+        y = A * math.cos(p1) * math.sin(l1) + B * math.cos(p2) * math.sin(l2)
+        z = A * math.sin(p1) + B * math.sin(p2)
+        out.append((math.degrees(math.atan2(z, math.hypot(x, y))),
+                    math.degrees(math.atan2(y, x))))
+    return out
+
+
+# ── viewport ─────────────────────────────────────────────────────────────────
+REGIONS = [
+    ("world", (-180, 180, -85, 85)),
+    ("asia", (60, 150, -12, 55)),
+    ("americas", (-130, -34, -56, 60)),
+    ("europe", (-25, 45, 34, 72)),
+    ("home", (max(-180.0, HOME[1] - 22), min(180.0, HOME[1] + 22),
+              max(-85.0, HOME[0] - 15), min(85.0, HOME[0] + 15))),
+]
+
+
+class Viewport:
+    def __init__(self, bbox):
+        self.set(bbox)
+
+    def set(self, bbox):
+        self.lon0, self.lon1, self.lat0, self.lat1 = bbox
+
+    def to_cell(self, lon, lat, MW, H):
+        if not (self.lon0 <= lon <= self.lon1 and self.lat0 <= lat <= self.lat1):
+            return None
+        cx = int((lon - self.lon0) / (self.lon1 - self.lon0) * (MW - 1))
+        cy = int((self.lat1 - lat) / (self.lat1 - self.lat0) * (H - 1))
+        return cx, cy
+
+    def center(self):
+        return ((self.lat0 + self.lat1) / 2, (self.lon0 + self.lon1) / 2)
+
+    def span(self):
+        return self.lon1 - self.lon0, self.lat1 - self.lat0
+
+    def zoom(self, f):
+        clat, clon = self.center()
+        dw, dh = self.span()
+        dw, dh = dw * f / 2, dh * f / 2
+        dw = max(4, min(180, dw))
+        dh = max(2, min(85, dh))
+        self.set((clon - dw, clon + dw, clat - dh, clat + dh))
+
+    def pan(self, fx, fy):
+        dw, dh = self.span()
+        self.lon0 += dw * fx
+        self.lon1 += dw * fx
+        self.lat0 = max(-89, min(self.lat0 + dh * fy, 88))
+        self.lat1 = max(-88, min(self.lat1 + dh * fy, 89))
+
+
+# ── coastline (cached per viewport+size) ─────────────────────────────────────
+def load_lines():
+    try:
+        d = json.load(open(DATA, encoding="utf-8"))
+    except Exception:
+        return []
+    out = []
+    for f in d.get("features", []):
+        g = f.get("geometry") or {}
+        if g.get("type") == "LineString":
+            out.append(g["coordinates"])
+        elif g.get("type") == "MultiLineString":
+            out.extend(g["coordinates"])
+    return out
+
+
+LINES = load_lines()
+_coast_cache = {}
+
+
+def coastline_cells(vp, MW, H):
+    key = (round(vp.lon0, 1), round(vp.lon1, 1), round(vp.lat0, 1), round(vp.lat1, 1), MW, H)
+    if key in _coast_cache:
+        return _coast_cache[key]
+    PW, PH = MW * 2, H * 4
+    dots = bytearray(PW * PH)
+
+    def plot(x, y):
+        if 0 <= x < PW and 0 <= y < PH:
+            dots[y * PW + x] = 1
+
+    lon0, lon1, lat0, lat1 = vp.lon0, vp.lon1, vp.lat0, vp.lat1
+    sx, sy = (PW - 1) / (lon1 - lon0), (PH - 1) / (lat1 - lat0)
+    for line in LINES:
+        prev = None
+        for lon, lat in line:
+            inside = lon0 <= lon <= lon1 and lat0 <= lat <= lat1
+            x, y = (lon - lon0) * sx, (lat1 - lat) * sy
+            if prev and (inside or prev[2]):
+                x0, y0, _ = prev
+                steps = int(max(abs(x - x0), abs(y - y0))) + 1
+                for i in range(steps + 1):
+                    t = i / steps
+                    plot(int(x0 + (x - x0) * t), int(y0 + (y - y0) * t))
+            prev = (x, y, inside)
+    cells = [[None] * MW for _ in range(H)]
+    for r in range(H):
+        by = r * 4
+        for c in range(MW):
+            bits, bx = 0, c * 2
+            for dy in range(4):
+                ro = (by + dy) * PW
+                for dx in range(2):
+                    if dots[ro + bx + dx]:
+                        bits |= 1 << BITS[(dx, dy)]
+            if bits:
+                cells[r][c] = chr(0x2800 + bits)
+    if len(_coast_cache) > 12:
+        _coast_cache.clear()
+    _coast_cache[key] = cells
+    return cells
+
+
+# ── terminator (day/night) ───────────────────────────────────────────────────
+def subsolar():
+    now = datetime.now(timezone.utc)
+    n = now.timetuple().tm_yday
+    decl = -23.44 * math.cos(math.radians(360.0 / 365.0 * (n + 10)))
+    utc_h = now.hour + now.minute / 60.0 + now.second / 3600.0
+    lon = -15.0 * (utc_h - 12.0)
+    lon = (lon + 180) % 360 - 180
+    return lon, decl
+
+
+def is_night(lon, lat, sslon, ssdecl):
+    h = math.radians(lon - sslon)
+    elev = (math.sin(math.radians(lat)) * math.sin(math.radians(ssdecl))
+            + math.cos(math.radians(lat)) * math.cos(math.radians(ssdecl)) * math.cos(h))
+    return elev < -0.05
+
+
+# ── layers + live feeds (background threads) ─────────────────────────────────
+def mag_color(m):
+    if m >= 6:
+        return rgb(220, 70, 60)
+    if m >= 5:
+        return rgb(228, 110, 70)
+    if m >= 4:
+        return rgb(234, 158, 60)
+    if m >= 2.5:
+        return rgb(212, 180, 80)
+    return rgb(150, 150, 110)
+
+
+def gdacs_color(level):
+    return {"Red": rgb(220, 70, 60), "Orange": rgb(234, 158, 60),
+            "Green": rgb(150, 170, 110)}.get(level, rgb(160, 160, 110))
+
+
+def _get(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": "worldmap/2"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.load(resp)
+
+
+def fetch_quakes():
+    d = _get("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson")
+    pts = []
+    for f in d.get("features", []):
+        c = (f.get("geometry") or {}).get("coordinates") or []
+        p = f.get("properties") or {}
+        if len(c) >= 2 and p.get("mag") is not None:
+            pts.append({"lon": c[0], "lat": c[1], "w": p["mag"], "t": p.get("time", 0),
+                        "glyph": "✸" if p["mag"] >= 5 else "◉", "color": mag_color(p["mag"]),
+                        "label": f"M{p['mag']:.1f}", "place": p.get("place") or "-",
+                        "detail": f"depth {c[2]:.0f}km" if len(c) > 2 else "", "id": f.get("id", ""),
+                        "url": p.get("url", "")})
+    pts.sort(key=lambda q: q["t"], reverse=True)
+    return pts
+
+
+def fetch_gdacs():
+    d = _get("https://www.gdacs.org/gdacsapi/api/events/geteventlist/EVENTS4APP")
+    pts = []
+    for f in d.get("features", []):
+        c = (f.get("geometry") or {}).get("coordinates") or []
+        p = f.get("properties") or {}
+        if len(c) >= 2:
+            lvl = p.get("alertlevel", "Green")
+            pts.append({"lon": c[0], "lat": c[1], "w": p.get("alertscore", 1) or 1,
+                        "t": 0, "glyph": "▴", "color": gdacs_color(lvl),
+                        "label": f"{p.get('eventtype','?')} {lvl}",
+                        "place": p.get("name") or p.get("country") or "-",
+                        "detail": (p.get("description") or "")[:60], "id": str(p.get("eventid", "")),
+                        "url": p.get("url", {}).get("report", "") if isinstance(p.get("url"), dict) else "",
+                        "level": lvl})
+    return pts
+
+
+def fetch_gdelt():
+    # GEO 2.0 GeoJSON — empty-safe: any failure/format issue → no points.
+    try:
+        url = ("https://api.gdeltproject.org/api/v2/geo/geo?query=(conflict%20OR%20protest%20OR%20"
+               "disaster)&format=GeoJSON&timespan=1d&maxpoints=60")
+        d = _get(url, timeout=12)
+    except Exception:
+        return []
+    pts = []
+    for f in d.get("features", []):
+        c = (f.get("geometry") or {}).get("coordinates") or []
+        p = f.get("properties") or {}
+        if len(c) >= 2:
+            nm = p.get("name") or "event"
+            pts.append({"lon": c[0], "lat": c[1], "w": p.get("count", 1) or 1, "t": 0,
+                        "glyph": "✚", "color": rgb(150, 175, 210), "label": "news",
+                        "place": nm.split(",")[0][:40], "detail": nm[:60],
+                        "id": nm, "url": p.get("shareimage", "")})
+    return pts
+
+
+_iss_trail = []
+
+
+def fetch_iss():
+    global _iss_trail
+    d = _get("https://api.wheretheiss.at/v1/satellites/25544", timeout=8)
+    lon, lat = d["longitude"], d["latitude"]
+    _iss_trail.append((lon, lat))
+    if len(_iss_trail) > 40:
+        del _iss_trail[: len(_iss_trail) - 40]
+    return [{"lon": lon, "lat": lat, "w": 9, "t": int(time.time() * 1000), "glyph": "✦",
+             "color": rgb(120, 210, 230), "label": "ISS",
+             "place": f"{lat:.1f},{lon:.1f}", "detail": f"{d.get('velocity',0):.0f} km/h",
+             "id": "iss", "url": ""}]
+
+
+LAYERS = [
+    {"key": "1", "name": "quakes", "glyph": "◉", "color": rgb(228, 158, 70),
+     "enabled": True, "interval": 60, "fetch": fetch_quakes, "pts": []},
+    {"key": "2", "name": "news", "glyph": "✚", "color": rgb(150, 175, 210),
+     "enabled": True, "interval": 600, "fetch": fetch_gdelt, "pts": []},
+    {"key": "3", "name": "ISS", "glyph": "✦", "color": rgb(120, 210, 230),
+     "enabled": True, "interval": 5, "fetch": fetch_iss, "pts": []},
+    {"key": "4", "name": "disasters", "glyph": "▴", "color": rgb(234, 158, 60),
+     "enabled": True, "interval": 300, "fetch": fetch_gdacs, "pts": []},
+]
+TERMINATOR = {"key": "5", "name": "day/night", "enabled": True}
+
+_lock = threading.Lock()
+_last = {}
+
+
+def scheduler():
+    due = {ly["name"]: 0 for ly in LAYERS}
+    while True:
+        now = time.time()
+        for ly in LAYERS:
+            if OFFLINE:
+                continue
+            if now >= due[ly["name"]]:
+                try:
+                    pts = ly["fetch"]()
+                    with _lock:
+                        ly["pts"] = pts
+                        _last[ly["name"]] = time.time()
+                    if ly["name"] in ("quakes", "disasters"):
+                        check_alerts(ly, pts)
+                except Exception:
+                    pass
+                due[ly["name"]] = now + ly["interval"]
+        time.sleep(1)
+
+
+# ── alerts ───────────────────────────────────────────────────────────────────
+ALERTS_ON = os.environ.get("WORLDMAP_ALERTS", "0") == "1"
+_fired = {}
+_alert_times = []
+
+
+def _load_fired():
+    global _fired
+    try:
+        _fired = json.load(open(ALERT_STATE))
+    except Exception:
+        _fired = {}
+
+
+def _save_fired():
+    try:
+        os.makedirs(CFG, exist_ok=True)
+        json.dump(_fired, open(ALERT_STATE, "w"))
+    except Exception:
+        pass
+
+
+def check_alerts(layer, pts):
+    if not ALERTS_ON or not os.path.exists(TELEGRAM):
+        return
+    for p in pts:
+        eid = f"{layer['name']}:{p['id']}"
+        if eid in _fired:
+            continue
+        hit = False
+        if layer["name"] == "quakes":
+            d = haversine(HOME, (p["lat"], p["lon"]))
+            if p["w"] >= 6.0 or (p["w"] >= 4.5 and d <= 1000):
+                hit = True
+        elif layer["name"] == "disasters" and p.get("level") == "Red":
+            hit = True
+        if not hit:
+            continue
+        now = time.time()
+        _alert_times[:] = [t for t in _alert_times if now - t < 3600]
+        if len(_alert_times) >= 6:
+            return
+        msg = f"worldmap: {p['label']} — {p['place']}"
+        if layer["name"] == "quakes":
+            msg += f" ({haversine(HOME,(p['lat'],p['lon'])):.0f} km from home)"
+        try:
+            subprocess.run([TELEGRAM, msg], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _fired[eid] = now
+            _alert_times.append(now)
+            _save_fired()
+        except Exception:
+            pass
+
+
+# ── input ────────────────────────────────────────────────────────────────────
+def read_key(timeout):
+    if _fd is None:
+        time.sleep(timeout)
+        return None
+    r, _, _ = select.select([_fd], [], [], timeout)
+    if not r:
+        return None
+    ch = os.read(_fd, 1).decode("utf-8", "ignore")
+    if ch == "\x1b":
+        r2, _, _ = select.select([_fd], [], [], 0.002)
+        if r2:
+            seq = os.read(_fd, 2).decode("utf-8", "ignore")
+            return {"[A": "UP", "[B": "DOWN", "[C": "RIGHT", "[D": "LEFT"}.get(seq, "ESC")
+        return "ESC"
+    if ch in ("\r", "\n"):
+        return "ENTER"
+    return ch
+
+
+# ── state ────────────────────────────────────────────────────────────────────
+class State:
+    def __init__(self):
+        self.vp = Viewport(REGIONS[0][1])
+        self.region = 0
+        self.cursor = list(self.vp.center())     # [lat, lon]
+        self.pinned = None
+        self.show_legend = False
+        self.show_help = False
+
+
+def ago(ms):
+    s = max(0, time.time() - ms / 1000.0)
+    return f"{int(s/60)}m" if s < 3600 else (f"{int(s/3600)}h" if s < 86400 else f"{int(s/86400)}d")
+
+
+# ── frame compositor ─────────────────────────────────────────────────────────
+def frame(st, cols, rows, fc):
+    FEEDW = 28 if cols >= 70 else 0
+    MW = cols - FEEDW - (3 if FEEDW else 0)
+    H = rows - 1
+    if MW < 24 or H < 8:
+        MW, FEEDW, H = cols, 0, max(1, rows - 1)
+    vp = st.vp
+    coast = coastline_cells(vp, MW, H)
+    grid = [[(coast[r][c], COAST) if coast[r][c] else (" ", None) for c in range(MW)]
+            for r in range(H)]
+
+    # terminator night wash (under everything)
+    if TERMINATOR["enabled"]:
+        sslon, ssdecl = subsolar()
+        for r in range(H):
+            lat = vp.lat1 - (r + 0.5) / H * (vp.lat1 - vp.lat0)
+            for c in range(MW):
+                lon = vp.lon0 + (c + 0.5) / MW * (vp.lon1 - vp.lon0)
+                if is_night(lon, lat, sslon, ssdecl):
+                    ch, col = grid[r][c]
+                    if col is None:
+                        grid[r][c] = ("⠂", NIGHT) if (r + c) % 7 == 0 else (" ", None)
+                    elif col == COAST:
+                        grid[r][c] = (ch, rgb(86, 78, 52))
+        sc = vp.to_cell(sslon, ssdecl, MW, H)
+        if sc:
+            grid[sc[1]][sc[0]] = ("☼", rgb(245, 220, 140))
+
+    with _lock:
+        layers = [(ly, list(ly["pts"])) for ly in LAYERS]
+
+    # home + great-circle arcs to significant quakes
+    sig = []
+    for ly, pts in layers:
+        if ly["name"] == "quakes" and ly["enabled"]:
+            sig = [p for p in pts if p["w"] >= 4.5][:5]
+    for p in sig:
+        for (alat, alon) in gc_arc(HOME, (p["lat"], p["lon"]), 22):
+            cc = vp.to_cell(alon, alat, MW, H)
+            if cc and grid[cc[1]][cc[0]][0] == " ":
+                grid[cc[1]][cc[0]] = ("⠂", ARC)
+    hc = vp.to_cell(HOME[1], HOME[0], MW, H)
+    if hc:
+        grid[hc[1]][hc[0]] = ("⌂", HOMEC)
+
+    # layer markers + ping rings (freshest of each layer)
+    for ly, pts in layers:
+        if not ly["enabled"]:
+            continue
+        for i, p in enumerate(pts[:8]):
+            cc = vp.to_cell(p["lon"], p["lat"], MW, H)
+            if not cc:
+                continue
+            radius = ((fc + i * 3) % 14) * 0.55
+            if radius >= 1:
+                for a in range(0, 360, 24):
+                    rx = int(cc[0] + radius * math.cos(math.radians(a)))
+                    ry = int(cc[1] + radius * 0.5 * math.sin(math.radians(a)))
+                    if 0 <= rx < MW and 0 <= ry < H and grid[ry][rx][0] in (" ", coast[ry][rx] if coast[ry][rx] else " "):
+                        grid[ry][rx] = ("⠂", p["color"])
+        for i, p in enumerate(pts[:200]):
+            cc = vp.to_cell(p["lon"], p["lat"], MW, H)
+            if not cc:
+                continue
+            col = p["color"]
+            if i < 4 and (fc // 3) % 2:
+                col = rgb(255, 240, 210)
+            grid[cc[1]][cc[0]] = (p.get("glyph", "●"), col)
+    # ISS trail
+    if any(ly["enabled"] and ly["name"] == "ISS" for ly, _ in layers):
+        for (tlon, tlat) in _iss_trail[:-1]:
+            cc = vp.to_cell(tlon, tlat, MW, H)
+            if cc and grid[cc[1]][cc[0]][0] == " ":
+                grid[cc[1]][cc[0]] = ("⠂", rgb(70, 120, 140))
+
+    # scan sweep
+    sweep = fc % MW if MW else 0
+    for r in range(H):
+        ch, col = grid[r][sweep]
+        if col == COAST:
+            grid[r][sweep] = (ch, COAST_HOT)
+
+    # cursor + nearest marker
+    cur = vp.to_cell(st.cursor[1], st.cursor[0], MW, H)
+    nearest = None
+    best = 1e18
+    for ly, pts in layers:
+        if not ly["enabled"]:
+            continue
+        for p in pts:
+            d = haversine((st.cursor[0], st.cursor[1]), (p["lat"], p["lon"]))
+            if d < best:
+                best, nearest = d, (ly, p)
+    if cur:
+        grid[cur[1]][cur[0]] = ("⌖", CURSORC)
+
+    # ── render map rows + side panel ──
+    panel = build_panel(st, layers, nearest, MW, H, FEEDW)
+    out = ["\x1b[H"]
+    for r in range(H):
+        line, last = [], ""
+        for c in range(MW):
+            ch, col = grid[r][c]
+            if col and col != last:
+                line.append(col)
+                last = col
+            elif not col and last:
+                line.append(R)
+                last = ""
+            line.append(ch)
+        if last:
+            line.append(R)
+        if FEEDW:
+            line.append(f" {MUT}|{R} ")
+            line.append(panel[r] if r < len(panel) else "")
+        line.append("\x1b[K")
+        out.append("".join(line))
+        out.append("\n")
+
+    # status bar
+    active = "".join(ly["key"] for ly in LAYERS if ly["enabled"]) + ("5" if TERMINATOR["enabled"] else "")
+    reg = REGIONS[st.region][0]
+    al = f"{rgb(228,110,70)}ALERTS{R}" if ALERTS_ON else f"{MUT}alerts off{R}"
+    src = "OFFLINE" if OFFLINE else "live"
+    out.append(f"{MUT}layers[{active}] {reg} {src} {al}  ? help  q quit{R}\x1b[K")
+    return "".join(out)
+
+
+def build_panel(st, layers, nearest, MW, H, FEEDW):
+    if not FEEDW:
+        return []
+    lines = []
+    if st.show_help:
+        lines = [f"{BRASS}{BD}KEYS{R}", f"{MUT}{'-'*FEEDW}{R}",
+                 f"{INK}1-5{R} toggle layer", f"{INK}+ -{R} zoom",
+                 f"{INK}h j k l{R} pan", f"{INK}↑↓←→{R} move cursor",
+                 f"{INK}Enter{R} inspect  {INK}Esc{R} unpin", f"{INK}r{R} region",
+                 f"{INK}a{R} alerts  {INK}L{R} legend", f"{INK}q{R} quit"]
+        return lines
+    if st.show_legend:
+        lines = [f"{BRASS}{BD}LAYERS{R}", f"{MUT}{'-'*FEEDW}{R}"]
+        for ly in LAYERS:
+            on = f"{ly['color']}{ly['glyph']}{R}" if ly["enabled"] else f"{MUT}·{R}"
+            n = len(ly["pts"])
+            age = _last.get(ly["name"])
+            a = f"{int(time.time()-age)}s" if age else "-"
+            lines.append(f"{on} {INK if ly['enabled'] else MUT}{ly['key']} {ly['name']:<9}{R}{MUT}{n:>3} {a}{R}")
+        t = f"{rgb(245,220,140)}☀{R}" if TERMINATOR["enabled"] else f"{MUT}·{R}"
+        lines.append(f"{t} {INK}5 day/night{R}")
+        return lines
+    if st.pinned:
+        p = st.pinned
+        d = haversine(HOME, (p["lat"], p["lon"]))
+        b = bearing(HOME, (p["lat"], p["lon"]))
+        lines = [f"{BRASS}{BD}INSPECT{R}", f"{MUT}{'-'*FEEDW}{R}",
+                 f"{p['color']}{p.get('glyph','◉')}{R} {INK}{BD}{p['label']}{R}",
+                 f"{INK}{p['place'][:FEEDW]}{R}", f"{MUT}{p.get('detail','')[:FEEDW]}{R}",
+                 f"{MUT}{d:.0f} km {compass(b)} of home{R}",
+                 f"{MUT}{ago(p['t']) if p['t'] else ''}{R}", "",
+                 f"{MUT}Esc to release{R}"]
+        return lines
+    # default feed: merged significant events
+    lines = [f"{BRASS}{BD}LIVE FEED{R}", f"{MUT}{'-'*FEEDW}{R}"]
+    if nearest:
+        ly, p = nearest
+        d = haversine((st.cursor[0], st.cursor[1]), (p["lat"], p["lon"]))
+        lines.append(f"{MUT}> nearest {d:.0f}km{R}")
+        lines.append(f"{p['color']}{p.get('glyph','◉')}{R} {INK}{p['label']} {p['place'][:FEEDW-10]}{R}")
+        lines.append("")
+    merged = []
+    for ly, pts in layers:
+        if ly["enabled"]:
+            for p in pts[:10]:
+                merged.append((ly, p))
+    merged.sort(key=lambda x: x[1].get("w", 0), reverse=True)
+    for ly, p in merged[: max(0, H - len(lines))]:
+        place = p["place"]
+        if len(place) > FEEDW - 9:
+            place = place[: FEEDW - 10] + "."
+        lines.append(f"{p['color']}{p.get('glyph','◉')}{R} {INK}{p['label']:<5}{R} {INK}{place}{R}")
+    return lines
+
+
+# ── main loop ────────────────────────────────────────────────────────────────
+def main():
+    if not LINES:
+        sys.stdout.write(f"no coastline data at {DATA}\n"
+                         "(Natural Earth 1:110m coastline GeoJSON — see tools/eyecandy/README.md)\n")
+        return 1
+    _load_fired()
+    if not OFFLINE:
+        threading.Thread(target=scheduler, daemon=True).start()
+    if _fd is not None:
+        tty.setcbreak(_fd)
+    sys.stdout.write("\x1b[?25l\x1b[2J")
+    sys.stdout.flush()
+    global ALERTS_ON
+    st = State()
+    fc = 0
+    while True:
+        cols, rows = shutil.get_terminal_size((100, 30))
+        sys.stdout.write(frame(st, cols, rows, fc))
+        sys.stdout.flush()
+        fc += 1
+        k = read_key(0.12)
+        if k is None:
+            continue
+        if k == "q":
+            restore()
+        elif k in ("1", "2", "3", "4"):
+            ly = LAYERS[int(k) - 1]
+            ly["enabled"] = not ly["enabled"]
+        elif k == "5":
+            TERMINATOR["enabled"] = not TERMINATOR["enabled"]
+        elif k in ("+", "="):
+            st.vp.zoom(0.7)
+        elif k in ("-", "_"):
+            st.vp.zoom(1.43)
+        elif k == "h":
+            st.vp.pan(-0.18, 0)
+        elif k == "l":
+            st.vp.pan(0.18, 0)
+        elif k == "k":
+            st.vp.pan(0, 0.18)
+        elif k == "j":
+            st.vp.pan(0, -0.18)
+        elif k == "r":
+            st.region = (st.region + 1) % len(REGIONS)
+            st.vp.set(REGIONS[st.region][1])
+            st.cursor = list(st.vp.center())
+        elif k in ("UP", "DOWN", "LEFT", "RIGHT"):
+            dw, dh = st.vp.span()
+            stp_lon, stp_lat = dw / 24, dh / 24
+            if k == "UP":
+                st.cursor[0] = min(89, st.cursor[0] + stp_lat)
+            elif k == "DOWN":
+                st.cursor[0] = max(-89, st.cursor[0] - stp_lat)
+            elif k == "LEFT":
+                st.cursor[1] -= stp_lon
+            else:
+                st.cursor[1] += stp_lon
+        elif k == "ENTER":
+            cols, rows = shutil.get_terminal_size((100, 30))
+            FEEDW = 28 if cols >= 70 else 0
+            MW = cols - FEEDW - (3 if FEEDW else 0)
+            Hh = rows - 1
+            with _lock:
+                cand = [(ly, p) for ly in LAYERS if ly["enabled"] for p in list(ly["pts"])]
+            if cand:
+                cand.sort(key=lambda x: haversine((st.cursor[0], st.cursor[1]), (x[1]["lat"], x[1]["lon"])))
+                st.pinned = cand[0][1]
+                st.show_legend = st.show_help = False
+        elif k == "ESC":
+            st.pinned = None
+        elif k == "a":
+            ALERTS_ON = not ALERTS_ON
+        elif k == "L":
+            st.show_legend = not st.show_legend
+        elif k == "?":
+            st.show_help = not st.show_help
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    finally:
+        restore()

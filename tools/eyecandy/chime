@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# chime <done|attn> — soft audio cues for Claude Code sessions.
+#   done → Stop hook (the assistant finished a turn). Very soft tick.
+#   attn → Notification hook (it needs you: permission / idle prompt). Clearer.
+# Backgrounded so the hook never blocks. Silent on non-macOS / no afplay.
+# Disable entirely with NO_CHIME=1.
+# Volumes deliberately low — an instrument, not an alarm. Tune here only.
+[ -n "$NO_CHIME" ] && exit 0
+command -v afplay >/dev/null 2>&1 || exit 0
+case "${1:-done}" in
+  done) afplay -v 1.0  /System/Library/Sounds/Bottle.aiff    >/dev/null 2>&1 & ;;
+  attn) afplay -v 1.0  /System/Library/Sounds/Submarine.aiff >/dev/null 2>&1 & ;;
+esac
+exit 0

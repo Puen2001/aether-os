@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# logo-anim — picks one of the braille logo animations at random and execs it,
+# so the workbench logo pane varies per launch. Override the pick with
+# EYECANDY_LOGO_ANIM=<name> (donut|starfield|lorenz). Falls back gracefully if a
+# chosen animation is missing. NOTE: `lorenz` is opt-in only — it needs a big pane
+# to read as the attractor; in the small logo pane it looks like noise, so it's not
+# in the random rotation. Pin it with EYECANDY_LOGO_ANIM=lorenz on a full-size
+# window. (`worldmap` is interactive and needs data, so it never auto-rotates.)
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ANIMS=(donut starfield)
+
+pick="${EYECANDY_LOGO_ANIM:-}"
+if [ -z "$pick" ]; then
+  pick="${ANIMS[$((RANDOM % ${#ANIMS[@]}))]}"
+fi
+
+# exec the pick — siblings in this directory first, then PATH; if missing, fall
+# through the list to the first that exists.
+try() {
+  [ -x "$HERE/$1" ] && exec "$HERE/$1"
+  command -v "$1" >/dev/null 2>&1 && exec "$1"
+}
+try "$pick"
+for a in "${ANIMS[@]}"; do
+  try "$a"
+done
+exec sleep infinity   # nothing available → keep the pane alive, blank

@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""vault-lint — surface shared-knowledge-vault pages that may have rotted.
+
+Scans the vault's concepts/, entities/, sources/, analysis/ and flags pages
+that hit any of three lint criteria:
+
+  (a) ORPHAN          — no inbound [[wiki-link]] from any other vault page
+  (b) STALE           — last edited > 180 days ago (git log mtime, falls back
+                        to filesystem mtime if no git history yet)
+  (c) MISSING IP-CLEAN — frontmatter lacks `ip_clean: true|false`
+                        (required for shared-knowledge-vault pages per
+                        system/SYSTEM.md sec. 4)
+
+Writes one markdown report to <vault>/wiki/lint-queue.md. Idempotent —
+re-running overwrites. Surface only; does not delete, archive, or modify pages.
+
+The repo root resolves from this script's location (tools/..), overridable
+via the PAI_ROOT env var. The vault defaults to vaults/vault1; pass a vault
+name (resolved under <root>/vaults/) or a path as the first argument.
+
+Usage:
+    vault-lint              # lint vaults/vault1, write wiki/lint-queue.md
+    vault-lint vault2       # lint a different vault by name
+    vault-lint --dry        # print to stdout, write nothing
+"""
+from __future__ import annotations
+import argparse
+import datetime as dt
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SCAN_DIRS = ("concepts", "entities", "sources", "analysis")
+STALE_DAYS = 180
+
+WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+IP_CLEAN_RE = re.compile(r"^\s*ip_clean\s*:\s*(true|false)\b", re.IGNORECASE | re.MULTILINE)
+
+
+def repo_root() -> Path:
+    env = os.environ.get("PAI_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path(__file__).resolve().parent.parent
+
+
+def resolve_vault(arg: str) -> Path:
+    # A bare name resolves under <root>/vaults/; anything path-like is taken as-is.
+    if os.sep in arg or arg.startswith((".", "~")):
+        return Path(arg).expanduser().resolve()
+    return repo_root() / "vaults" / arg
+
+
+def all_pages(vault: Path) -> list[Path]:
+    out = []
+    for sub in SCAN_DIRS:
+        d = vault / sub
+        if d.is_dir():
+            out.extend(sorted(p for p in d.rglob("*.md") if p.is_file()))
+    return out
+
+
+def link_targets(text: str) -> set[str]:
+    """Extract the stem of each [[wikilink]] target (path-aware)."""
+    targets = set()
+    for m in WIKILINK_RE.finditer(text):
+        raw = m.group(1).strip()
+        stem = Path(raw).stem if "/" in raw or raw.endswith(".md") else raw
+        if stem:
+            targets.add(stem)
+    return targets
+
+
+def git_age_days(vault: Path, path: Path) -> int | None:
+    """Days since last git commit touching path, or None if no git history."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(vault), "log", "-1", "--format=%ct", "--", str(path.relative_to(vault))],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        if not out:
+            return None
+        return (dt.datetime.now().timestamp() - int(out)) // 86400
+    except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
+        return None
+
+
+def page_age_days(vault: Path, path: Path) -> int:
+    git_age = git_age_days(vault, path)
+    if git_age is not None:
+        return int(git_age)
+    return int((dt.datetime.now().timestamp() - path.stat().st_mtime) // 86400)
+
+
+def has_ip_clean(text: str) -> bool:
+    m = FRONTMATTER_RE.match(text)
+    if not m:
+        return False
+    return bool(IP_CLEAN_RE.search(m.group(1)))
+
+
+def lint(vault: Path) -> dict:
+    pages = all_pages(vault)
+    if not pages:
+        return {"pages": [], "orphans": [], "stale": [], "missing_ip": [], "total": 0}
+
+    contents = {p: p.read_text(encoding="utf-8", errors="replace") for p in pages}
+    by_stem: dict[str, Path] = {p.stem: p for p in pages}
+
+    inbound: dict[Path, int] = {p: 0 for p in pages}
+    for src, text in contents.items():
+        for tgt_stem in link_targets(text):
+            tgt = by_stem.get(tgt_stem)
+            if tgt and tgt != src:
+                inbound[tgt] += 1
+
+    orphans, stale, missing_ip = [], [], []
+    for p in pages:
+        if inbound[p] == 0:
+            orphans.append(p)
+        age = page_age_days(vault, p)
+        if age > STALE_DAYS:
+            stale.append((p, age))
+        if not has_ip_clean(contents[p]):
+            missing_ip.append(p)
+
+    return {
+        "pages": pages,
+        "orphans": orphans,
+        "stale": stale,
+        "missing_ip": missing_ip,
+        "total": len(pages),
+    }
+
+
+def render(result: dict, vault: Path) -> str:
+    now = dt.datetime.now().strftime("%Y-%m-%dT%H:%M")
+    today = dt.date.today().isoformat()
+    head = (
+        "---\n"
+        f"title: vault lint queue — {today}\n"
+        "type: meta\n"
+        "tags: [vault, lint, housekeeping]\n"
+        f"generated_at: {now}\n"
+        "ip_clean: true\n"
+        "---\n\n"
+        f"# vault lint queue — {today}\n\n"
+        f"Auto-generated by `tools/vault-lint` (vault: `{vault.name}`). Surface only — review "
+        "and decide: keep, rewrite, archive, or move to its originating domain vault.\n\n"
+    )
+
+    sections = []
+
+    def rel(p: Path) -> str:
+        return str(p.relative_to(vault))
+
+    def link(p: Path) -> str:
+        return f"[[{rel(p)[:-3]}]]"
+
+    if result["orphans"]:
+        sections.append("## (a) Orphans — no inbound `[[wiki-link]]`\n\n")
+        sections.append("These pages aren't referenced by any other vault page. Either link them in from a relevant concept, or consider archiving.\n\n")
+        for p in result["orphans"]:
+            sections.append(f"- {link(p)} — `{rel(p)}`\n")
+        sections.append("\n")
+
+    if result["stale"]:
+        sections.append(f"## (b) Stale — no edit in > {STALE_DAYS} days\n\n")
+        sections.append("These pages may still reflect your current view — or may not. Reread; update or mark superseded.\n\n")
+        for p, age in sorted(result["stale"], key=lambda t: -t[1]):
+            sections.append(f"- {link(p)} — `{rel(p)}` · {age}d old\n")
+        sections.append("\n")
+
+    if result["missing_ip"]:
+        sections.append("## (c) Missing `ip_clean:` frontmatter field\n\n")
+        sections.append("Per `system/SYSTEM.md` sec. 4, every shared-knowledge-vault page must self-attest IP-clean status. Add `ip_clean: true` (or `false` + relocate to its domain vault).\n\n")
+        for p in result["missing_ip"]:
+            sections.append(f"- {link(p)} — `{rel(p)}`\n")
+        sections.append("\n")
+
+    if not result["orphans"] and not result["stale"] and not result["missing_ip"]:
+        sections.append("_no findings — vault is clean._\n\n")
+
+    summary = (
+        "## Summary\n\n"
+        f"- pages scanned: **{result['total']}**\n"
+        f"- orphans: **{len(result['orphans'])}**\n"
+        f"- stale (>{STALE_DAYS}d): **{len(result['stale'])}**\n"
+        f"- missing ip_clean: **{len(result['missing_ip'])}**\n"
+    )
+    return head + "".join(sections) + summary
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("vault", nargs="?", default="vault1",
+                    help="vault name under <root>/vaults/, or a path to a vault dir. default: vault1")
+    ap.add_argument("--dry", action="store_true", help="print report to stdout; write nothing")
+    args = ap.parse_args(argv)
+
+    vault = resolve_vault(args.vault)
+    if not vault.is_dir():
+        print(f"error: vault dir not found: {vault}", file=sys.stderr)
+        return 1
+    report_path = vault / "wiki" / "lint-queue.md"
+
+    result = lint(vault)
+    report = render(result, vault)
+
+    if args.dry:
+        sys.stdout.write(report)
+        return 0
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report, encoding="utf-8")
+    try:
+        shown = report_path.relative_to(repo_root())
+    except ValueError:
+        shown = report_path
+    print(
+        f"wrote {shown} · "
+        f"{result['total']} pages · "
+        f"{len(result['orphans'])} orphans · "
+        f"{len(result['stale'])} stale · "
+        f"{len(result['missing_ip'])} missing ip_clean"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

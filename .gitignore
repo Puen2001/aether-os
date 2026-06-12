@@ -13,6 +13,16 @@ tools/.autopush-enabled
 system/memory/pending/*.json
 system/memory/.last-sweep
 
+# Voice pipeline: machine-local config + secrets, raw transcripts, KB index
+voice/config.env
+voice/secrets.env
+system/voice/.transcripts-raw/
+system/kb/lance/
+system/kb/.venv/
+
+# Your own generated launchers (./aether launcher) — machine-specific
+launchers/
+
 # Maintainer-private notes (never ship)
 MARKETING.md
 

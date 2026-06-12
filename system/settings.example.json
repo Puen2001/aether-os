@@ -53,6 +53,11 @@
             "type": "command",
             "command": "system/hooks/vault-sync.sh",
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "system/hooks/voice-digest.sh",
+            "timeout": 30
           }
         ]
       }
@@ -69,6 +74,11 @@
           {
             "type": "command",
             "command": "system/hooks/memory-sweep-due.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "system/hooks/voice-digest-resume.sh",
             "timeout": 5
           }
         ]

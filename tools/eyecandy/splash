@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# splash — AETHER OS boot splash, VHS-tape style. ~5s, near-zero-dependency.
+# Skips automatically when: NO_SPLASH=1, or stdout is not a TTY (scripts/CI).
+# Motion: the mark + wordmark glitch left/right and lose detail like an old VHS
+# tape (terminaltexteffects `vhstape`), centered in the terminal, then settle to a
+# brass final gradient. The ~3.5s glitch always plays in full; only the trailing
+# ~1.0s freeze on the finished mark is skippable by a keypress.
+# Palette: VHS RGB glitch lines, resting on brass #C9A24B.
+# To go full-VHS at rest, swap --final-gradient-stops to: ab48ff e7b2b2 fffebd.
+
+[ -n "$NO_SPLASH" ] && exit 0
+[ -t 1 ] || exit 0
+
+# Truecolor → brass color ramp; else flat 256-color brass (Terminal.app floor).
+if [ "$COLORTERM" = "truecolor" ] || [ "$COLORTERM" = "24bit" ]; then TRUE=1; else TRUE=0; fi
+RST=$'\033[0m'
+brass() { # r g b  → set fg
+  if [ "$TRUE" = 1 ]; then printf '\033[38;2;%d;%d;%dm' "$1" "$2" "$3"; else printf '\033[38;5;137m'; fi
+}
+
+# Banner — geometric mark + wordmark + tagline, one row per line. Each line is
+# pre-padded with leading spaces so its content sits centered relative to the
+# widest line (the wordmark, 49 cols); tte then centers the whole block in the
+# terminal. The mark (~7 cols) carries a left pad to sit centered above the
+# wordmark.
+BANNER=(
+""
+'                        /\'
+'                       /  \'
+'                      /____\'
+""
+" █████╗ ███████╗████████╗██╗  ██╗███████╗██████╗ "
+"██╔══██╗██╔════╝╚══██╔══╝██║  ██║██╔════╝██╔══██╗"
+"███████║█████╗     ██║   ███████║█████╗  ██████╔╝"
+"██╔══██║██╔══╝     ██║   ██╔══██║██╔══╝  ██╔══██╗"
+"██║  ██║███████╗   ██║   ██║  ██║███████╗██║  ██║"
+"╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝"
+""
+"     ──────────────────────────────────────"
+"     one assistant · many vaults · no bleed"
+)
+banner() { local l; for l in "${BANNER[@]}"; do printf '%s\n' "$l"; done; }
+
+# Skippable only with a real keyboard. Without a TTY stdin (piped/automation)
+# we pace with sleep so instant-EOF reads can't race the whole animation to a
+# blank exit.
+[ -t 0 ] && SKIPPABLE=1 || SKIPPABLE=0
+
+stty_save=$(stty -g 2>/dev/null)
+cleanup() { tput cnorm 2>/dev/null; [ -n "$stty_save" ] && stty "$stty_save" 2>/dev/null; }
+skip() { cleanup; clear 2>/dev/null; exit 0; }
+trap skip INT
+tput civis 2>/dev/null   # hide cursor
+clear 2>/dev/null
+
+# Boot tone — optional. Drop a short power-on wav at
+# ~/.config/personal-ai/sounds/boot-chord.wav and it plays async OVER the
+# animation; never blocks. Silent if afplay/file absent (macOS only) or
+# SPLASH_NO_SOUND=1.
+if [ -z "$SPLASH_NO_SOUND" ] && command -v afplay >/dev/null 2>&1; then
+  afplay -v 1.0 "$HOME/.config/personal-ai/sounds/boot-chord.wav" >/dev/null 2>&1 &
+fi
+
+# nap — pure pacing for the fallback animation. NOT skippable: the animation must
+# always play in full so the mark never flashes past. Ctrl-C still aborts via the
+# INT trap.
+nap() { sleep "$1"; }
+
+# hold — the trailing freeze on the FINISHED mark. Skippable by any keypress so
+# an impatient launch can dismiss the held frame, but it only runs after the
+# animation has already completed. Drains buffered launch input first (cbreak so
+# single bytes are readable) so the held frame isn't insta-dismissed by the
+# Enter that launched us.
+hold() {
+  if [ "$SKIPPABLE" = 1 ]; then
+    stty -echo -icanon min 1 time 0 2>/dev/null
+    while read -rsn1 -t 0.02 _k 2>/dev/null; do :; done   # drain launch-Enter + paste-ahead
+    read -rsn1 -t "$1" _k; local rc=$?
+    if [ "$rc" -eq 0 ]; then skip            # a real keypress → dismiss the freeze
+    elif [ "$rc" -le 128 ]; then sleep "$1"  # EOF/error (no live keyboard) → freeze the full time anyway
+    fi                                       # rc>128 = timed out → full freeze already elapsed
+  else
+    sleep "$1"
+  fi
+}
+
+# 1. VHS tape: lines glitch left/right and lose detail like an old VHS tape, then
+#    settle to a brass final gradient. Centered in the terminal (canvas + text both
+#    anchored center). 3.5s glitch = 350 frames at 100 fps. If tte is absent, fall
+#    back to a centered brass draw-in + power-on pulse.
+if command -v tte >/dev/null 2>&1; then
+  # NB: tte global options (--anchor-*, --frame-rate) MUST precede the `vhstape`
+  # subcommand; effect-specific options follow it.
+  banner | tte \
+    --anchor-canvas c --anchor-text c --frame-rate 100 \
+    vhstape \
+    --total-glitch-time 350 --noise-chance 0.008 \
+    --glitch-line-colors ffffff ff2b2b 2bff2b 2b2bff ffffff \
+    --glitch-wave-colors ffffff ff2b2b 2bff2b 2b2bff ffffff \
+    --final-gradient-stops c9a24b f5e8be --final-gradient-direction vertical \
+    2>/dev/null
+else
+  # Fallback: center horizontally via tput cols, brass draw-in + power-on pulse.
+  cols=$(tput cols 2>/dev/null || echo 80)
+  bw=0; for l in "${BANNER[@]}"; do [ "${#l}" -gt "$bw" ] && bw=${#l}; done
+  margin=$(( (cols - bw) / 2 )); [ "$margin" -lt 0 ] && margin=0
+  pad=$(printf '%*s' "$margin" "")
+  cbanner() { local l; for l in "${BANNER[@]}"; do printf '%s%s\n' "$pad" "$l"; done; }
+  prev=-1
+  for i in "${!BANNER[@]}"; do
+    if [ "$prev" -ge 0 ]; then
+      tput cup "$prev" 0 2>/dev/null; brass 201 162 75; printf '%s%s%s' "$pad" "${BANNER[$prev]}" "$RST"
+    fi
+    tput cup "$i" 0 2>/dev/null; brass 245 232 190; printf '%s%s%s' "$pad" "${BANNER[$i]}" "$RST"
+    prev=$i
+    nap 0.16
+  done
+  for rgb in "230 205 140" "201 162 75" "230 205 140" "201 162 75"; do
+    tput cup 0 0 2>/dev/null
+    # shellcheck disable=SC2086
+    brass $rgb; cbanner; printf '%s' "$RST"
+    nap 0.22
+  done
+fi
+
+hold 1.0   # freeze on the finished mark so it can be admired (skippable by keypress)
+
+cleanup
+clear 2>/dev/null
+exit 0

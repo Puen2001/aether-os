@@ -1,0 +1,5 @@
+# Telegram voice bridge — third-party deps (everything else is stdlib).
+# Install into the voice venv:
+#   python3 -m venv ~/.config/personal-ai/voice/.venv
+#   ~/.config/personal-ai/voice/.venv/bin/pip install -r requirements-telegram.txt
+requests>=2.31
