@@ -25,8 +25,8 @@
 
 AETHER OS gives your AI assistant a careful, *governed* memory of who you are — and a
 built-in **IP-clean filter** so your personal, employer, and client worlds never bleed into each
-other. One assistant. Many vaults. No bleed. Runs on Claude Code **or any LLM** (local or hosted).
-**MIT-licensed. Free forever.**
+other. One assistant. Many vaults. No bleed. **Runs fully local on your own model** — or any cloud
+LLM you choose. **MIT-licensed. Free forever.**
 
 ```bash
 git clone https://github.com/Puen2001/aether-os && cd aether-os && claude
@@ -34,6 +34,25 @@ git clone https://github.com/Puen2001/aether-os && cd aether-os && claude
 
 Then say: **"Read examples/introduction.md and introduce yourself."** That's the whole taste — no
 wiring, nothing written, nothing leaves your machine.
+
+---
+
+## Your code never leaves your machine
+
+The exact worry behind *"is there an AI that won't ship my company's code to the cloud?"* — AETHER
+is built for it:
+
+- **Local-first brain.** Point it at a free local model (Ollama / LM Studio) and **nothing goes to
+  any cloud AI** — your prompts, code, and notes stay on your machine. Cloud providers (Claude Code,
+  OpenAI, Gemini, …) are opt-in, one per command — you choose, per command, what (if anything) leaves.
+- **Scoped access, not your whole disk.** It writes only inside the vault you're working in, and the
+  voice assistant reads only the vaults you whitelist (`READ_VAULTS`) — the model never sees more
+  than you scope to the question.
+- **A leak gate before anything ships.** A pre-commit scan blocks secrets and client/company
+  fingerprints from landing in notes you'd share.
+
+No tool is 100% safe — but this removes the "I pasted company code into a cloud AI" risk by default.
+*(ไม่การันตี 100% แต่ตัดความเสี่ยงโค้ดบริษัทรั่วเข้า cloud AI โดยตรงออกไปได้ตั้งแต่ต้น)*
 
 ---
 
