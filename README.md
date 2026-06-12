@@ -124,15 +124,16 @@ aether-os/
 
 ## Quickstart
 
-**Claude Code is not required.** AETHER runs two ways, mix and match:
+**Claude Code is not required — it just unlocks the most.** Mix and match:
 
-- **With Claude Code** (the default agent experience). The 11 agents, skills,
-  and hooks use Claude Code's formats. Zero extra model calls — your only spend
-  is your normal Claude Code usage.
-- **On any LLM backend** (no Claude Code). The voice/phone assistant runs on a
-  **free local model** (Ollama, LM Studio) or any OpenAI-compatible API — see
-  [Voice & any-backend setup](#voice--any-backend-setup). The vaults, memory
-  engine, and tools are plain Python/POSIX and need no agent runtime at all.
+- **With Claude Code** — the full experience. You get the 11 agents, skills, and
+  lifecycle hooks (these use Claude Code's own formats), on top of everything
+  below. Zero extra model calls — your only spend is your normal Claude Code usage.
+- **With any other AI** — Codex, Gemini, OpenAI, a free local model (Ollama,
+  LM Studio), or any chat CLI. AETHER still runs, with a smaller feature set: the
+  voice/phone assistant, your vaults, the knowledge base, and the tools all work.
+  The Claude-Code-only parts — the agents, skills, and hook automation — stay off.
+  See [Voice & any-backend setup](#voice--any-backend-setup).
 
 macOS, Linux, or **Windows via WSL2**.
 
