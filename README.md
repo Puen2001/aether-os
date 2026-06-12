@@ -53,7 +53,6 @@ is built for it:
   notes you'd share. It's a safety net, not a guarantee — review what you commit.
 
 No tool is 100% safe — but this removes the "I pasted company code into a cloud AI" risk by default.
-*(ไม่การันตี 100% แต่ตัดความเสี่ยงโค้ดบริษัทรั่วเข้า cloud AI โดยตรงออกไปได้ตั้งแต่ต้น)*
 
 ---
 
