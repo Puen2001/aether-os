@@ -46,10 +46,11 @@ is built for it:
   any cloud AI** — your prompts, code, and notes stay on your machine. Cloud providers (Claude Code,
   OpenAI, Gemini, …) are opt-in, one per command — you choose, per command, what (if anything) leaves.
 - **Scoped access, not your whole disk.** It writes only inside the vault you're working in, and the
-  voice assistant reads only the vaults you whitelist (`READ_VAULTS`) — the model never sees more
-  than you scope to the question.
-- **A leak gate before anything ships.** A pre-commit scan blocks secrets and client/company
-  fingerprints from landing in notes you'd share.
+  voice assistant is pointed at the vaults you whitelist (`READ_VAULTS`). (For strict read-isolation,
+  keep private vaults outside the workspace — see [PRIVACY.md](docs/PRIVACY.md).)
+- **A leak gate before anything ships.** A pre-commit scan flags **common secret formats** (vendor API
+  keys, tokens, JWTs, connection-string credentials) and your denylisted names before they land in
+  notes you'd share. It's a safety net, not a guarantee — review what you commit.
 
 No tool is 100% safe — but this removes the "I pasted company code into a cloud AI" risk by default.
 *(ไม่การันตี 100% แต่ตัดความเสี่ยงโค้ดบริษัทรั่วเข้า cloud AI โดยตรงออกไปได้ตั้งแต่ต้น)*

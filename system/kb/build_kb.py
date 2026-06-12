@@ -18,6 +18,11 @@ import os
 import re
 from pathlib import Path
 
+# The embedding model downloads once from its host on first build; suppress the
+# Hugging Face hub telemetry ping while fetching it (your vault data never leaves
+# — only the model is downloaded). Mirrors recall.py.
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 import lancedb
 from lancedb.embeddings import get_registry
 from lancedb.pydantic import LanceModel, Vector

@@ -18,4 +18,13 @@ xox[abprs]-[A-Za-z0-9-]{10,}             # Slack tokens
 AKIA[0-9A-Z]{16}                         # AWS access key id
 ASIA[0-9A-Z]{16}                         # AWS temporary key id
 AIza[0-9A-Za-z_-]{35}                    # Google API key
+sk_live_[A-Za-z0-9]{16,}                 # Stripe live secret key
+rk_live_[A-Za-z0-9]{16,}                 # Stripe restricted live key
 -----BEGIN [A-Z ]*PRIVATE KEY-----       # PEM private keys
+
+# Generic / vendor-agnostic shapes — catch secrets that carry no known prefix
+eyJ[A-Za-z0-9_=-]{8,}\.eyJ[A-Za-z0-9_=-]{8,}\.[A-Za-z0-9_=-]+   # JWT (header.payload.sig)
+Bearer[[:space:]]+[A-Za-z0-9._~+/-]{20,}                        # Bearer token
+[A-Za-z][A-Za-z0-9+.-]*://[^/:@[:space:]]+:[^/@[:space:]]+@     # credentials in a URL / connection string
+AccountKey=[A-Za-z0-9+/]{40,}={0,2}                             # Azure storage account key
+(api[_-]?key|secret|password|passwd|client_secret|access_token|auth_token)[[:space:]]*[:=][[:space:]]*["'][^"']{16,}   # secret in a quoted assignment
